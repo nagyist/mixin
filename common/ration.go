@@ -5,15 +5,15 @@ import (
 	"math/big"
 )
 
-var OneRat RationalNumber
-
-func init() {
-	OneRat = NewInteger(1).Ration(NewInteger(1))
-}
+var OneRat = NewInteger(1).Ration(NewInteger(1))
 
 type RationalNumber struct {
 	x big.Int
 	y big.Int
+}
+
+func (r RationalNumber) String() string {
+	return r.Product(NewInteger(1)).String()
 }
 
 func (x Integer) Ration(y Integer) (v RationalNumber) {

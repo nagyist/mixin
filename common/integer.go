@@ -12,11 +12,7 @@ import (
 
 const Precision = 8
 
-var Zero Integer
-
-func init() {
-	Zero = NewInteger(0)
-}
+var Zero = NewInteger(0)
 
 type Integer struct {
 	i big.Int
@@ -30,7 +26,7 @@ func NewIntegerFromString(x string) (v Integer) {
 	if d.Sign() < 0 {
 		panic(x)
 	}
-	s := d.Mul(decimal.New(1, Precision)).StringFixed(0)
+	s := d.Mul(decimal.New(1, Precision)).Floor().String()
 	v.i.SetString(s, 10)
 	return
 }
@@ -110,15 +106,6 @@ func (x Integer) String() string {
 		return s[:p] + "." + s[p:]
 	}
 	return "0." + strings.Repeat("0", -p) + s
-}
-
-func (x Integer) MarshalMsgpack() ([]byte, error) {
-	return x.i.Bytes(), nil
-}
-
-func (x *Integer) UnmarshalMsgpack(data []byte) error {
-	x.i.SetBytes(data)
-	return nil
 }
 
 func (x Integer) MarshalJSON() ([]byte, error) {

@@ -22,45 +22,9 @@ type UTXOKeys struct {
 	Keys []*crypto.Key
 }
 
-type UTXOKeysReader interface {
-	ReadUTXOKeys(hash crypto.Hash, index int) (*UTXOKeys, error)
-}
-
-type UTXOLockReader interface {
-	ReadUTXOLock(hash crypto.Hash, index int) (*UTXOWithLock, error)
-	CheckDepositInput(deposit *DepositData, tx crypto.Hash) error
-	ReadLastMintDistribution(group string) (*MintDistribution, error)
-}
-
-type UTXOLocker interface {
-	LockUTXOs(inputs []*Input, tx crypto.Hash, fork bool) error
-	LockDepositInput(deposit *DepositData, tx crypto.Hash, fork bool) error
-	LockMintInput(mint *MintData, tx crypto.Hash, fork bool) error
-}
-
-type GhostChecker interface {
-	CheckGhost(key crypto.Key) (*crypto.Hash, error)
-}
-
-type NodeReader interface {
-	ReadAllNodes(offset uint64, withState bool) []*Node
-	ReadTransaction(hash crypto.Hash) (*VersionedTransaction, string, error)
-}
-
-type DomainReader interface {
-	ReadDomains() []*Domain
-}
-
-type DataStore interface {
-	UTXOLockReader
-	UTXOLocker
-	GhostChecker
-	NodeReader
-	DomainReader
-}
-
 func (tx *VersionedTransaction) UnspentOutputs() []*UTXOWithLock {
 	var utxos []*UTXOWithLock
+	hash := tx.PayloadHash()
 	for i, out := range tx.Outputs {
 		switch out.Type {
 		case OutputTypeScript,
@@ -68,10 +32,10 @@ func (tx *VersionedTransaction) UnspentOutputs() []*UTXOWithLock {
 			OutputTypeNodeCancel,
 			OutputTypeNodeAccept,
 			OutputTypeNodeRemove,
-			OutputTypeDomainAccept,
-			OutputTypeWithdrawalFuel,
-			OutputTypeWithdrawalClaim:
-		case OutputTypeWithdrawalSubmit:
+			OutputTypeWithdrawalClaim,
+			OutputTypeCustodianUpdateNodes:
+		case OutputTypeWithdrawalSubmit,
+			OutputTypeCustodianSlashNodes:
 			continue
 		default:
 			panic(out.Type)
@@ -79,8 +43,8 @@ func (tx *VersionedTransaction) UnspentOutputs() []*UTXOWithLock {
 
 		utxo := UTXO{
 			Input: Input{
-				Hash:  tx.PayloadHash(),
-				Index: i,
+				Hash:  hash,
+				Index: uint(i),
 			},
 			Output: Output{
 				Type:   out.Type,
@@ -94,18 +58,6 @@ func (tx *VersionedTransaction) UnspentOutputs() []*UTXOWithLock {
 		utxos = append(utxos, &UTXOWithLock{UTXO: utxo})
 	}
 	return utxos
-}
-
-func (out *UTXOWithLock) CompressMarshal() []byte {
-	return compress(out.Marshal())
-}
-
-func DecompressUnmarshalUTXO(b []byte) (*UTXOWithLock, error) {
-	d := decompress(b)
-	if d == nil {
-		d = b
-	}
-	return UnmarshalUTXO(d)
 }
 
 func (out *UTXOWithLock) Marshal() []byte {
@@ -124,9 +76,7 @@ func UnmarshalUTXO(b []byte) (*UTXOWithLock, error) {
 
 	dec, err := NewMinimumDecoder(b)
 	if err != nil {
-		var utxo UTXOWithLock
-		err := msgpackUnmarshal(b, &utxo)
-		return &utxo, err
+		return nil, err
 	}
 
 	utxo := &UTXOWithLock{}

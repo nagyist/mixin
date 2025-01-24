@@ -2,6 +2,18 @@
 
 Semantic Versioning
 
+## v0.18 Stealth Phasmids Feb 13, 2024
+
+A new peer to peer network layer that improves security and privacy of the signer node.
+
+## v0.17 Silent Cicadas Oct 17, 2023
+
+Complete new transaction and snapshot releases, this version is meant to be a genesis reset of the previous mainnet.
+
+## v0.16 Outstanding Golden Moths Aug 6, 2023
+
+Mint and slashing rules for both Mixin Kernel and Mixin Safe.
+
 ## v0.15 Swift Goliath Beetles Apr 4, 2023
 
 Transaction version 4 with pure transaction references and large storage extra.

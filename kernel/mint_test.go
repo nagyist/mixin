@@ -10,164 +10,302 @@ import (
 	"github.com/MixinNetwork/mixin/crypto"
 	"github.com/MixinNetwork/mixin/kernel/internal"
 	"github.com/MixinNetwork/mixin/kernel/internal/clock"
-	"github.com/stretchr/testify/assert"
+	"github.com/MixinNetwork/mixin/logger"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPledgeAmount(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 
-	for y, m := range map[int]string{
-		0:  "10000",
-		1:  "11000",
-		2:  "11900",
-		3:  "12710",
-		4:  "13439",
-		5:  "14095.1",
-		6:  "14685.59",
-		7:  "15217.031",
-		8:  "15695.3279",
-		9:  "16125.79511",
-		10: "16513.215599",
-	} {
-		for b := 365 * y; b < 365*(y+1); b++ {
-			since := time.Duration(b*24) * time.Hour
-			assert.Equal(common.NewIntegerFromString(m), pledgeAmount(since))
-		}
+	require.Equal(common.NewIntegerFromString("13439"), common.KernelNodePledgeAmount)
+}
+
+func TestMintBatchSize(t *testing.T) {
+	require := require.New(t)
+
+	for i := uint64(1707); i < 1825; i++ {
+		amount := common.NewIntegerFromString("89.87671232")
+		require.Equal(amount, mintBatchSize(i))
 	}
+	require.Equal(common.NewIntegerFromString("89.87671232"), mintMultiBatchesSize(1706, 1707))
+	require.Equal(common.NewIntegerFromString("179.75342464"), mintMultiBatchesSize(1706, 1708))
+
+	require.Equal(common.NewIntegerFromString("80.88904109"), mintBatchSize(1825))
+	require.Equal(common.NewIntegerFromString("80.88904109"), mintMultiBatchesSize(1824, 1825))
+	require.Equal(common.NewIntegerFromString("80.88904109"), mintMultiBatchesSize(1825, 1826))
+	require.Equal(common.NewIntegerFromString("161.77808218"), mintMultiBatchesSize(1825, 1827))
+
+	require.Equal(common.NewIntegerFromString("89.87671232"), mintMultiBatchesSize(1823, 1824))
+	require.Equal(common.NewIntegerFromString("170.76575341"), mintMultiBatchesSize(1823, 1825))
+	require.Equal(common.NewIntegerFromString("251.65479450"), mintMultiBatchesSize(1823, 1826))
+	require.Equal(common.NewIntegerFromString("341.53150682"), mintMultiBatchesSize(1822, 1826))
+
+	require.Equal(common.NewIntegerFromString("194102.43834270"), mintMultiBatchesSize(0, 1707))
+	require.Equal(common.NewIntegerFromString("29443.61095650"), mintMultiBatchesSize(1707, 2058))
 }
 
 func TestPoolSize(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 
-	assert.Equal(common.NewInteger(500000), poolSize(0))
-	assert.Equal(common.NewIntegerFromString("498767.12328830"), poolSize(10))
-	assert.Equal(common.NewInteger(500000), poolSize(0))
-	assert.Equal(common.NewIntegerFromString("455000"), poolSize(365))
-	assert.Equal(common.NewIntegerFromString("454889.04109592"), poolSize(366))
+	require.Equal(common.NewInteger(500000), poolSizeUniversal(0))
+	require.Equal(common.NewIntegerFromString("498630.13698640"), poolSizeUniversal(10))
+	require.Equal(common.NewInteger(500000), poolSizeUniversal(0))
+	require.Equal(common.NewIntegerFromString("450000"), poolSizeUniversal(365))
+	require.Equal(common.NewIntegerFromString("449876.71232877"), poolSizeUniversal(366))
+	require.Equal(common.NewIntegerFromString("307917.61644032"), poolSizeUniversal(1684))
+	require.Equal(common.NewIntegerFromString("305850.45205696"), poolSizeUniversal(1707))
+
+	require.True(common.NewInteger(500000).Sub(poolSizeUniversal(1707)).Cmp(mintMultiBatchesSize(0, 1707)) > 0)
+}
+
+func TestUniversalMintTransaction(t *testing.T) {
+	require := require.New(t)
+	logger.SetLevel(0)
+
+	root, err := os.MkdirTemp("", "mixin-mint-test")
+	require.Nil(err)
+	defer os.RemoveAll(root)
+
+	internal.ToggleMockRunAggregators(true)
+	node := setupTestNode(require, root)
+	require.NotNil(node)
+
+	snaps, err := node.persistStore.ReadSnapshotsSinceTopology(0, 100)
+	require.Nil(err)
+	require.Len(snaps, 28)
+	node.IdForNetwork = snaps[0].NodeId
+
+	addr := "XINYneY2gomSHxkYF62pxbNdwcdhcayxJRAeyUanJR611q5NWg4QebfFhEF3Me8qCHR8g8tD6QHPHD8naZnnn3GdRrhhiuxi"
+	custodian, _ := common.NewAddressFromString(addr)
+
+	amount := common.NewIntegerFromString("89.87671232")
+	require.Equal(amount.String(), node.lastMintDistribution().Amount.String())
+	require.Equal(uint64(1706), node.lastMintDistribution().Batch)
+
+	tx := common.NewTransactionV5(common.XINAssetId)
+	tx.AddUniversalMintInput(uint64(1706), amount)
+	tx.AddScriptOutput([]*common.Address{&custodian}, common.NewThresholdScript(1), amount, make([]byte, 64))
+	versioned := tx.AsVersioned()
+	err = versioned.LockInputs(node.persistStore, false)
+	require.Nil(err)
+	err = node.persistStore.WriteTransaction(versioned)
+	require.Nil(err)
+
+	legacy := time.Date(2023, time.Month(10), 31, 8, 0, 0, 0, time.UTC)
+	clock.MockDiff(legacy.Sub(clock.Now()))
+	snap := &common.Snapshot{
+		Version:     common.SnapshotVersionCommonEncoding,
+		NodeId:      node.IdForNetwork,
+		RoundNumber: 1,
+		Timestamp:   uint64(legacy.UnixNano()),
+		Signature:   &crypto.CosiSignature{Mask: 1},
+	}
+	snap.AddSoleTransaction(versioned.PayloadHash())
+	cache, err := loadHeadRoundForNode(node.persistStore, node.IdForNetwork)
+	require.Nil(err)
+	require.NotNil(cache)
+	snap.References = &common.RoundLink{
+		Self:     cache.References.Self,
+		External: cache.References.External,
+	}
+	snap.Hash = snap.PayloadHash()
+	node.TopoWrite(snap, []crypto.Hash{snap.NodeId})
+
+	signers := node.genesisNodes
+	for _, tr := range []struct {
+		diff  time.Duration
+		round uint64
+	}{{
+		diff:  time.Hour,
+		round: 0,
+	}, {
+		diff:  time.Hour * 23,
+		round: 1,
+	}} {
+		clock.MockDiff(tr.diff)
+		timestamp := clock.NowUnixNano()
+		for i := 0; i < 2; i++ {
+			snapshots := testBuildMintSnapshots(signers, tr.round, timestamp)
+			err = node.persistStore.WriteRoundWork(node.IdForNetwork, tr.round, snapshots, true)
+			require.Nil(err)
+			for j := 1; j < 2*len(signers)/3+1; j++ {
+				err = node.persistStore.WriteRoundWork(signers[j], tr.round, snapshots, true)
+				require.Nil(err)
+			}
+
+			day := uint32(snapshots[0].Timestamp / uint64(time.Hour*24))
+			works, err := node.persistStore.ListNodeWorks(signers, day)
+			require.Nil(err)
+			require.Len(works, len(signers))
+		}
+
+		batch := (timestamp - node.Epoch) / (24 * uint64(time.Hour))
+		for i, id := range signers {
+			if i == len(signers)*2/3+1 {
+				break
+			}
+			err = node.persistStore.WriteRoundSpaceAndState(&common.RoundSpace{
+				NodeId:   id,
+				Batch:    batch,
+				Round:    tr.round,
+				Duration: 0,
+			})
+			require.Nil(err)
+		}
+	}
+
+	timestamp := clock.NowUnixNano()
+	cur := &common.CustodianUpdateRequest{Custodian: &custodian}
+	versioned = node.buildUniversalMintTransaction(cur, timestamp, false)
+	require.NotNil(versioned)
+
+	amount = common.NewIntegerFromString("89.87671232")
+	mint := versioned.Inputs[0].Mint
+	require.Equal(uint64(KernelNetworkLegacyEnding+1), mint.Batch)
+	require.Equal("UNIVERSAL", mint.Group)
+	require.Equal(amount.String(), mint.Amount.String())
+	require.Len(versioned.Outputs, len(signers)+2)
+	var kernel, safe, light common.Integer
+	for i, o := range versioned.Outputs {
+		if i == len(signers) {
+			safe = o.Amount
+			require.Equal("fffe01", o.Script.String())
+		} else if i == len(signers)+1 {
+			light = o.Amount
+			require.Equal("fffe40", o.Script.String())
+		} else {
+			kernel = kernel.Add(o.Amount)
+			require.Equal("fffe01", o.Script.String())
+		}
+	}
+	require.Equal(common.NewIntegerFromString("44.93835595"), kernel)
+	require.Equal(common.NewIntegerFromString("35.95068492"), safe)
+	require.Equal(common.NewIntegerFromString("8.98767145"), light)
 }
 
 func TestMintWorks(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 
 	root, err := os.MkdirTemp("", "mixin-mint-test")
-	assert.Nil(err)
+	require.Nil(err)
 	defer os.RemoveAll(root)
 
 	internal.ToggleMockRunAggregators(true)
 
-	node := setupTestNode(assert, root)
-	assert.NotNil(node)
+	node := setupTestNode(require, root)
+	require.NotNil(node)
 
 	offset, err := node.persistStore.ReadWorkOffset(node.IdForNetwork)
-	assert.Nil(err)
-	assert.Equal(uint64(0), offset)
+	require.Nil(err)
+	require.Equal(uint64(0), offset)
 
 	signers := append(node.genesisNodes, node.IdForNetwork)
-	timestamp := uint64(clock.Now().UnixNano())
+	timestamp := clock.NowUnixNano()
+	leaders := len(signers)*2/3 + 1
 	for i := 0; i < 2; i++ {
 		snapshots := testBuildMintSnapshots(signers[1:], 0, timestamp)
-		err = node.persistStore.WriteRoundWork(node.IdForNetwork, 0, snapshots)
-		assert.Nil(err)
-		for i := 1; i < 11; i++ {
-			err = node.persistStore.WriteRoundWork(signers[i], 0, snapshots)
-			assert.Nil(err)
+		err = node.persistStore.WriteRoundWork(node.IdForNetwork, 0, snapshots, true)
+		require.Nil(err)
+		for j := 1; j < leaders; j++ {
+			err = node.persistStore.WriteRoundWork(signers[j], 0, snapshots, true)
+			require.Nil(err)
 		}
 
 		works, err := node.persistStore.ListNodeWorks(signers, uint32(snapshots[0].Timestamp/uint64(time.Hour*24)))
-		assert.Nil(err)
-		assert.Len(works, 16)
+		require.Nil(err)
+		require.Len(works, len(signers))
 		for i, id := range signers {
 			if i == 0 {
-				assert.Equal(uint64(0), works[id][0])
-				assert.Equal(uint64(0), works[id][1])
-			} else if i < 11 {
-				assert.Equal(uint64(100), works[id][0])
-				assert.Equal(uint64(1000), works[id][1])
-			} else if i < 15 {
-				assert.Equal(uint64(0), works[id][0])
-				assert.Equal(uint64(1100), works[id][1])
+				require.Equal(uint64(0), works[id][0])
+				require.Equal(uint64(0), works[id][1])
+			} else if i < leaders {
+				require.Equal(uint64(100), works[id][0])
+				require.Equal(uint64(100*(leaders-1)), works[id][1])
+			} else if i < len(node.genesisNodes) {
+				require.Equal(uint64(0), works[id][0])
+				require.Equal(uint64(100*leaders), works[id][1])
 			} else {
-				assert.Equal(uint64(100), works[id][0])
-				assert.Equal(uint64(1000), works[id][1])
+				require.Equal(uint64(100), works[id][0])
+				require.Equal(uint64(100*(leaders-1)), works[id][1])
 			}
 		}
 		offset, err := node.persistStore.ReadWorkOffset(node.IdForNetwork)
-		assert.Nil(err)
-		assert.Equal(uint64(0), offset)
+		require.Nil(err)
+		require.Equal(uint64(0), offset)
 	}
 
-	timestamp = uint64(clock.Now().UnixNano())
+	timestamp = clock.NowUnixNano()
 	snapshots := testBuildMintSnapshots(signers[1:], 1, timestamp)
-	err = node.persistStore.WriteRoundWork(node.IdForNetwork, 1, snapshots[:98])
-	assert.Nil(err)
+	err = node.persistStore.WriteRoundWork(node.IdForNetwork, 1, snapshots[:98], true)
+	require.Nil(err)
 
 	works, err := node.persistStore.ListNodeWorks(signers, uint32(snapshots[0].Timestamp/uint64(time.Hour*24)))
-	assert.Nil(err)
-	assert.Len(works, 16)
-	assert.Equal(uint64(198), works[node.IdForNetwork][0])
-	assert.Equal(uint64(1000), works[node.IdForNetwork][1])
+	require.Nil(err)
+	require.Len(works, len(signers))
+	require.Equal(uint64(198), works[node.IdForNetwork][0])
+	require.Equal(uint64(100*(leaders-1)), works[node.IdForNetwork][1])
 	for i, id := range signers {
 		if i == 0 {
-			assert.Equal(uint64(0), works[id][0])
-			assert.Equal(uint64(0), works[id][1])
-		} else if i < 11 {
-			assert.Equal(uint64(100), works[id][0])
-			assert.Equal(uint64(1098), works[id][1])
-		} else if i < 15 {
-			assert.Equal(uint64(0), works[id][0])
-			assert.Equal(uint64(1198), works[id][1])
+			require.Equal(uint64(0), works[id][0])
+			require.Equal(uint64(0), works[id][1])
+		} else if i < leaders {
+			require.Equal(uint64(100), works[id][0])
+			require.Equal(uint64(100*(leaders-1)+98), works[id][1])
+		} else if i < len(node.genesisNodes) {
+			require.Equal(uint64(0), works[id][0])
+			require.Equal(uint64(100*leaders+98), works[id][1])
 		} else {
-			assert.Equal(uint64(198), works[id][0])
-			assert.Equal(uint64(1000), works[id][1])
+			require.Equal(uint64(198), works[id][0])
+			require.Equal(uint64(100*(leaders-1)), works[id][1])
 		}
 	}
 	offset, err = node.persistStore.ReadWorkOffset(node.IdForNetwork)
-	assert.Nil(err)
-	assert.Equal(uint64(1), offset)
+	require.Nil(err)
+	require.Equal(uint64(1), offset)
 
-	err = node.persistStore.WriteRoundWork(node.IdForNetwork, 1, snapshots)
-	assert.Nil(err)
-	for i := 1; i < 11; i++ {
-		err = node.persistStore.WriteRoundWork(signers[i], 1, nil)
-		assert.Nil(err)
+	err = node.persistStore.WriteRoundWork(node.IdForNetwork, 1, snapshots, true)
+	require.Nil(err)
+	for i := 1; i < leaders; i++ {
+		err = node.persistStore.WriteRoundWork(signers[i], 1, nil, true)
+		require.Nil(err)
 	}
 
 	works, err = node.persistStore.ListNodeWorks(signers, uint32(snapshots[0].Timestamp/uint64(time.Hour*24)))
-	assert.Nil(err)
-	assert.Len(works, 16)
-	assert.Equal(uint64(200), works[node.IdForNetwork][0])
-	assert.Equal(uint64(1000), works[node.IdForNetwork][1])
+	require.Nil(err)
+	require.Len(works, len(node.genesisNodes)+1)
+	require.Equal(uint64(200), works[node.IdForNetwork][0])
+	require.Equal(uint64(100*(leaders-1)), works[node.IdForNetwork][1])
 	for i, id := range signers {
-		if i == 0 {
-			assert.Equal(uint64(0), works[id][0])
-			assert.Equal(uint64(0), works[id][1])
-		} else if i < 11 {
-			assert.Equal(uint64(100), works[id][0])
-			assert.Equal(uint64(1100), works[id][1])
-		} else if i < 15 {
-			assert.Equal(uint64(0), works[id][0])
-			assert.Equal(uint64(1200), works[id][1])
-		} else {
-			assert.Equal(uint64(200), works[id][0])
-			assert.Equal(uint64(1000), works[id][1])
+		if i == 0 { // 0
+			require.Equal(uint64(0), works[id][0])
+			require.Equal(uint64(0), works[id][1])
+		} else if i < leaders { // 120 + 100 * 19
+			require.Equal(uint64(100), works[id][0])
+			require.Equal(uint64(100*(leaders-1)+100), works[id][1])
+		} else if i < len(node.genesisNodes) { // 0 + 100 * 20
+			require.Equal(uint64(0), works[id][0])
+			require.Equal(uint64(100*leaders+100), works[id][1])
+		} else { // 200 * 1.2 + 100 * 18
+			require.Equal(uint64(200), works[id][0])
+			require.Equal(uint64(100*(leaders-1)), works[node.IdForNetwork][1])
 		}
 	}
 	offset, err = node.persistStore.ReadWorkOffset(node.IdForNetwork)
-	assert.Nil(err)
-	assert.Equal(uint64(1), offset)
+	require.Nil(err)
+	require.Equal(uint64(1), offset)
 
 	timestamp = uint64(clock.Now().Add(24 * time.Hour).UnixNano())
 	snapshots = testBuildMintSnapshots(signers[1:], 2, timestamp)
-	err = node.persistStore.WriteRoundWork(node.IdForNetwork, 2, snapshots[:10])
-	assert.Nil(err)
-	for i := 1; i < 11; i++ {
-		err = node.persistStore.WriteRoundWork(signers[i], 2, snapshots[:10])
-		assert.Nil(err)
+	err = node.persistStore.WriteRoundWork(node.IdForNetwork, 2, snapshots[:10], true)
+	require.Nil(err)
+	for i := 1; i < leaders; i++ {
+		err = node.persistStore.WriteRoundWork(signers[i], 2, snapshots[:10], true)
+		require.Nil(err)
 	}
 
 	batch := (timestamp - node.Epoch) / (24 * uint64(time.Hour))
 	for i, id := range signers {
-		if i == 11 {
+		if i == leaders {
 			break
 		}
 		err = node.persistStore.WriteRoundSpaceAndState(&common.RoundSpace{
@@ -176,30 +314,30 @@ func TestMintWorks(t *testing.T) {
 			Round:    0,
 			Duration: 0,
 		})
-		assert.Nil(err)
+		require.Nil(err)
 	}
 
 	accepted := make([]*CNode, len(signers))
 	for i, id := range signers {
 		accepted[i] = &CNode{IdForNetwork: id}
 	}
-	mints, err := node.distributeMintByWorks(accepted, common.NewInteger(10000), timestamp)
-	assert.Nil(err)
-	assert.Len(mints, 16)
+	mints, err := node.distributeKernelMintByWorks(accepted, common.NewInteger(10000), timestamp)
+	require.Nil(err)
+	require.Len(mints, len(node.genesisNodes)+1)
 	total := common.NewInteger(0)
 	for i, m := range mints {
 		if i == 0 { // 0
-			assert.Equal("94.59529577", m.Work.String())
-		} else if i < 11 { // 1220 * 10
-			assert.Equal("662.58616354", m.Work.String())
-		} else if i < 15 { // 1200 * 4
-			assert.Equal("653.78520881", m.Work.String())
+			require.Equal("52.72234781", m.Work.String())
+		} else if i < leaders { // 1220 * 10
+			require.Equal("369.22742985", m.Work.String())
+		} else if i < len(node.genesisNodes) { // 1200 * 4
+			require.Equal("366.41822348", m.Work.String())
 		} else { // 1240
-			assert.Equal("664.40223356", m.Work.String())
+			require.Equal("369.83812689", m.Work.String())
 		}
 		total = total.Add(m.Work)
 	}
-	assert.True(common.NewInteger(10000).Sub(total).Cmp(common.NewIntegerFromString("0.0000001")) < 0)
+	require.Equal(common.NewInteger(10000).Sub(total).String(), "0.00000016")
 }
 
 func testBuildMintSnapshots(signers []crypto.Hash, round, timestamp uint64) []*common.SnapshotWork {
@@ -208,7 +346,7 @@ func testBuildMintSnapshots(signers []crypto.Hash, round, timestamp uint64) []*c
 		hash := []byte(fmt.Sprintf("MW%d%d%d", round, timestamp, i))
 		s := common.SnapshotWork{
 			Timestamp: timestamp,
-			Hash:      crypto.NewHash(hash),
+			Hash:      crypto.Blake3Hash(hash),
 			Signers:   signers,
 		}
 		snapshots[i] = &s

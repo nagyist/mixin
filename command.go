@@ -1,13 +1,11 @@
 package main
 
 import (
-	"bytes"
-	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -16,42 +14,46 @@ import (
 	"github.com/MixinNetwork/mixin/common"
 	"github.com/MixinNetwork/mixin/config"
 	"github.com/MixinNetwork/mixin/crypto"
-	"github.com/MixinNetwork/mixin/kernel"
+	"github.com/MixinNetwork/mixin/rpc"
 	"github.com/MixinNetwork/mixin/storage"
 	"github.com/urfave/cli/v2"
 )
 
 func createAddressCmd(c *cli.Context) error {
-	seed := make([]byte, 64)
-	_, err := rand.Read(seed)
-	if err != nil {
-		return err
-	}
-	addr := common.NewAddressFromSeed(seed)
-	if view := c.String("view"); len(view) > 0 {
-		key, err := hex.DecodeString(view)
-		if err != nil {
-			return err
+	for {
+		seed := make([]byte, 64)
+		crypto.ReadRand(seed)
+		addr := common.NewAddressFromSeed(seed)
+		if view := c.String("view"); len(view) > 0 {
+			key, err := hex.DecodeString(view)
+			if err != nil {
+				return err
+			}
+			copy(addr.PrivateViewKey[:], key)
+			addr.PublicViewKey = addr.PrivateViewKey.Public()
 		}
-		copy(addr.PrivateViewKey[:], key)
-		addr.PublicViewKey = addr.PrivateViewKey.Public()
-	}
-	if spend := c.String("spend"); len(spend) > 0 {
-		key, err := hex.DecodeString(spend)
-		if err != nil {
-			return err
+		if spend := c.String("spend"); len(spend) > 0 {
+			key, err := hex.DecodeString(spend)
+			if err != nil {
+				return err
+			}
+			copy(addr.PrivateSpendKey[:], key)
+			addr.PublicSpendKey = addr.PrivateSpendKey.Public()
 		}
-		copy(addr.PrivateSpendKey[:], key)
-		addr.PublicSpendKey = addr.PrivateSpendKey.Public()
+		if c.Bool("public") {
+			addr.PrivateViewKey = addr.PublicSpendKey.DeterministicHashDerive()
+			addr.PublicViewKey = addr.PrivateViewKey.Public()
+		}
+		m := addr.String()[3:]
+		p := c.String("prefix")
+		s := c.String("suffix")
+		if strings.HasPrefix(m, p) && strings.HasSuffix(m, s) {
+			fmt.Printf("address:\t%s\n", addr.String())
+			fmt.Printf("view key:\t%s\n", addr.PrivateViewKey.String())
+			fmt.Printf("spend key:\t%s\n", addr.PrivateSpendKey.String())
+			return nil
+		}
 	}
-	if c.Bool("public") {
-		addr.PrivateViewKey = addr.PublicSpendKey.DeterministicHashDerive()
-		addr.PublicViewKey = addr.PrivateViewKey.Public()
-	}
-	fmt.Printf("address:\t%s\n", addr.String())
-	fmt.Printf("view key:\t%s\n", addr.PrivateViewKey.String())
-	fmt.Printf("spend key:\t%s\n", addr.PrivateSpendKey.String())
-	return nil
 }
 
 func decodeAddressCmd(c *cli.Context) error {
@@ -159,7 +161,7 @@ func validateGraphEntries(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	var gns kernel.Genesis
+	var gns common.Genesis
 	err = json.Unmarshal(f, &gns)
 	if err != nil {
 		return err
@@ -168,7 +170,7 @@ func validateGraphEntries(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	networkId := crypto.NewHash(data)
+	networkId := crypto.Blake3Hash(data)
 
 	store, err := storage.NewBadgerStore(custom, c.String("dir"))
 	if err != nil {
@@ -209,10 +211,7 @@ func buildRawTransactionCmd(c *cli.Context) error {
 	}
 	if len(seed) != 64 {
 		seed = make([]byte, 64)
-		_, err := rand.Read(seed)
-		if err != nil {
-			return err
-		}
+		crypto.ReadRand(seed)
 	}
 
 	viewKey, err := crypto.KeyFromString(c.String("view"))
@@ -256,7 +255,7 @@ func buildRawTransactionCmd(c *cli.Context) error {
 		}
 		inputs = append(inputs, map[string]any{
 			"hash":  hash,
-			"index": int(index),
+			"index": index,
 		})
 	}
 
@@ -283,11 +282,11 @@ func buildRawTransactionCmd(c *cli.Context) error {
 	var raw signerInput
 	raw.Node = c.String("node")
 	isb, _ := json.Marshal(map[string]any{"inputs": inputs})
-	json.Unmarshal(isb, &raw)
+	_ = json.Unmarshal(isb, &raw)
 
-	tx := common.NewTransactionV3(asset)
+	tx := common.NewTransactionV5(asset)
 	for _, in := range inputs {
-		tx.AddInput(in["hash"].(crypto.Hash), in["index"].(int))
+		tx.AddInput(in["hash"].(crypto.Hash), uint(in["index"].(int64)))
 	}
 	for _, out := range outputs {
 		tx.AddScriptOutput(out["accounts"].([]*common.Address), common.NewThresholdScript(1), out["amount"].(common.Integer), seed)
@@ -311,6 +310,9 @@ func signTransactionCmd(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
+	if raw.Version != common.TxVersionHashSignature {
+		return fmt.Errorf("invalid version number %d", raw.Version)
+	}
 	raw.Node = c.String("node")
 
 	seed, err := hex.DecodeString(c.String("seed"))
@@ -319,21 +321,18 @@ func signTransactionCmd(c *cli.Context) error {
 	}
 	if len(seed) != 64 {
 		seed = make([]byte, 64)
-		_, err := rand.Read(seed)
-		if err != nil {
-			return err
-		}
+		crypto.ReadRand(seed)
 	}
 
-	tx := common.NewTransactionV3(raw.Asset)
+	tx := common.NewTransactionV5(raw.Asset)
 	for _, in := range raw.Inputs {
 		if d := in.Deposit; d != nil {
 			tx.AddDepositInput(&common.DepositData{
-				Chain:           d.Chain,
-				AssetKey:        d.AssetKey,
-				TransactionHash: d.TransactionHash,
-				OutputIndex:     d.OutputIndex,
-				Amount:          d.Amount,
+				Chain:       d.Chain,
+				AssetKey:    d.AssetKey,
+				Transaction: d.TransactionHash,
+				Index:       d.OutputIndex,
+				Amount:      d.Amount,
 			})
 		} else {
 			tx.AddInput(in.Hash, in.Index)
@@ -350,7 +349,7 @@ func signTransactionCmd(c *cli.Context) error {
 				Mask:   out.Mask,
 			})
 		} else {
-			hash := crypto.NewHash(seed)
+			hash := crypto.Blake3Hash(seed)
 			seed = append(hash[:], hash[:]...)
 			tx.AddOutputWithType(out.Type, out.Accounts, out.Script, out.Amount, seed)
 		}
@@ -399,12 +398,63 @@ func sendTransactionCmd(c *cli.Context) error {
 	return err
 }
 
+func custodianDepositCmd(c *cli.Context) error {
+	receiver, err := common.NewAddressFromString(c.String("receiver"))
+	if err != nil {
+		return fmt.Errorf("invalid receiver %s", c.String("receiver"))
+	}
+	kph := c.String("custodian")
+	if len(kph) != 128 {
+		return fmt.Errorf("invalid custodian %s", kph)
+	}
+	view, err := crypto.KeyFromString(kph[:64])
+	if err != nil {
+		return fmt.Errorf("invalid custodian %s", kph)
+	}
+	spend, err := crypto.KeyFromString(kph[64:])
+	if err != nil {
+		return fmt.Errorf("invalid custodian %s", kph)
+	}
+	custodian := &common.Address{
+		PrivateViewKey:  view,
+		PrivateSpendKey: spend,
+		PublicViewKey:   view.Public(),
+		PublicSpendKey:  spend.Public(),
+	}
+
+	asset, err := crypto.HashFromString(c.String("asset"))
+	if err != nil {
+		return fmt.Errorf("invalid asset %s", c.String("asset"))
+	}
+	chain, err := crypto.HashFromString(c.String("chain"))
+	if err != nil {
+		return fmt.Errorf("invalid chain %s", c.String("chain"))
+	}
+	amount := common.NewIntegerFromString(c.String("amount"))
+	seed := make([]byte, 64)
+	crypto.ReadRand(seed)
+	script := common.NewThresholdScript(1)
+	deposit := &common.DepositData{
+		Chain:       chain,
+		AssetKey:    c.String("asset_key"),
+		Transaction: c.String("transaction"),
+		Index:       c.Uint64("index"),
+		Amount:      amount,
+	}
+	tx := common.NewTransactionV5(asset)
+	tx.AddDepositInput(deposit)
+	tx.AddScriptOutput([]*common.Address{&receiver}, script, amount, seed)
+	ver := tx.AsVersioned()
+	err = ver.SignInput(nil, 0, []*common.Address{custodian})
+	if err == nil {
+		fmt.Printf("%x\n", ver.Marshal())
+	}
+	return err
+}
+
 func pledgeNodeCmd(c *cli.Context) error {
 	seed := make([]byte, 64)
-	_, err := rand.Read(seed)
-	if err != nil {
-		return err
-	}
+	crypto.ReadRand(seed)
 	viewKey, err := crypto.KeyFromString(c.String("view"))
 	if err != nil {
 		return err
@@ -439,13 +489,22 @@ func pledgeNodeCmd(c *cli.Context) error {
 		return err
 	}
 	raw.Node = c.String("node")
+	info, err := rpc.GetInfo(raw.Node)
+	if err != nil {
+		return err
+	}
+	snap, err := rpc.GetSnapshot(raw.Node, info.Consensus.String())
+	if err != nil {
+		return err
+	}
 
 	amount := common.NewIntegerFromString(c.String("amount"))
 
-	tx := common.NewTransactionV3(common.XINAssetId)
+	tx := common.NewTransactionV5(common.XINAssetId)
 	tx.AddInput(input, 0)
 	tx.AddOutputWithType(common.OutputTypeNodePledge, nil, common.Script{}, amount, seed)
 	tx.Extra = append(signer.PublicSpendKey[:], payee.PublicSpendKey[:]...)
+	tx.References = []crypto.Hash{snap.SoleTransaction()}
 
 	signed := tx.AsVersioned()
 	err = signed.SignInput(raw, 0, []*common.Address{&account})
@@ -458,10 +517,7 @@ func pledgeNodeCmd(c *cli.Context) error {
 
 func cancelNodeCmd(c *cli.Context) error {
 	seed := make([]byte, 64)
-	_, err := rand.Read(seed)
-	if err != nil {
-		return err
-	}
+	crypto.ReadRand(seed)
 	viewKey, err := crypto.KeyFromString(c.String("view"))
 	if err != nil {
 		return err
@@ -519,7 +575,7 @@ func cancelNodeCmd(c *cli.Context) error {
 		return fmt.Errorf("invalid source and receiver %s %s", pig.String(), receiver.PublicSpendKey)
 	}
 
-	tx := common.NewTransactionV3(common.XINAssetId)
+	tx := common.NewTransactionV5(common.XINAssetId)
 	tx.AddInput(pledge.PayloadHash(), 0)
 	tx.AddOutputWithType(common.OutputTypeNodeCancel, nil, common.Script{}, pledge.Outputs[0].Amount.Div(100), seed)
 	tx.AddScriptOutput([]*common.Address{&receiver}, common.NewThresholdScript(1), pledge.Outputs[0].Amount.Sub(tx.Outputs[0].Amount), seed)
@@ -574,6 +630,38 @@ func decodePledgeNodeCmd(c *cli.Context) error {
 	}
 	fmt.Printf("signer: %s\n", signer)
 	fmt.Printf("payee: %s\n", payee)
+	return nil
+}
+
+func encodeCustodianExtraCmd(c *cli.Context) error {
+	signerSpend, err := crypto.KeyFromString(c.String("signer"))
+	if err != nil {
+		return err
+	}
+	payeeSpend, err := crypto.KeyFromString(c.String("payee"))
+	if err != nil {
+		return err
+	}
+	custodianSpend, err := crypto.KeyFromString(c.String("custodian"))
+	if err != nil {
+		return err
+	}
+	networkId, err := crypto.HashFromString(c.String("network"))
+	if err != nil {
+		return err
+	}
+
+	custodian := &common.Address{
+		PublicSpendKey: custodianSpend.Public(),
+		PublicViewKey:  custodianSpend.Public().DeterministicHashDerive().Public(),
+	}
+	payee := &common.Address{
+		PublicSpendKey: payeeSpend.Public(),
+		PublicViewKey:  payeeSpend.Public().DeterministicHashDerive().Public(),
+	}
+	extra := common.EncodeCustodianNode(custodian, payee, &signerSpend, &payeeSpend, &custodianSpend, networkId)
+	fmt.Printf("HEX: %x\n", extra)
+	fmt.Printf("BASE64: %s\n", base64.RawURLEncoding.EncodeToString(extra))
 	return nil
 }
 
@@ -652,6 +740,28 @@ func getCacheTransactionCmd(c *cli.Context) error {
 	return err
 }
 
+func getDepositTransactionCmd(c *cli.Context) error {
+	data, err := callRPC(c.String("node"), "getdeposittransaction", []any{
+		c.String("chain"),
+		c.String("hash"),
+		c.Int("index"),
+	}, c.Bool("time"))
+	if err == nil {
+		fmt.Println(string(data))
+	}
+	return err
+}
+
+func getWithdrawalClaimCmd(c *cli.Context) error {
+	data, err := callRPC(c.String("node"), "getwithdrawalclaim", []any{
+		c.String("hash"),
+	}, c.Bool("time"))
+	if err == nil {
+		fmt.Println(string(data))
+	}
+	return err
+}
+
 func getUTXOCmd(c *cli.Context) error {
 	data, err := callRPC(c.String("node"), "getutxo", []any{
 		c.String("hash"),
@@ -667,6 +777,24 @@ func getKeyCmd(c *cli.Context) error {
 	data, err := callRPC(c.String("node"), "getkey", []any{
 		c.String("key"),
 	}, c.Bool("time"))
+	if err == nil {
+		fmt.Println(string(data))
+	}
+	return err
+}
+
+func getAssetCmd(c *cli.Context) error {
+	data, err := callRPC(c.String("node"), "getasset", []any{
+		c.String("id"),
+	}, c.Bool("time"))
+	if err == nil {
+		fmt.Println(string(data))
+	}
+	return err
+}
+
+func listCustodianUpdatesCmd(c *cli.Context) error {
+	data, err := callRPC(c.String("node"), "listcustodianupdates", []any{}, c.Bool("time"))
 	if err == nil {
 		fmt.Println(string(data))
 	}
@@ -722,6 +850,14 @@ func listPeersCmd(c *cli.Context) error {
 	return err
 }
 
+func listRelayersCmd(c *cli.Context) error {
+	data, err := callRPC(c.String("node"), "listrelayers", []any{c.String("id")}, c.Bool("time"))
+	if err == nil {
+		fmt.Println(string(data))
+	}
+	return err
+}
+
 func dumpGraphHeadCmd(c *cli.Context) error {
 	data, err := callRPC(c.String("node"), "dumpgraphhead", []any{}, c.Bool("time"))
 	if err == nil {
@@ -731,14 +867,11 @@ func dumpGraphHeadCmd(c *cli.Context) error {
 }
 
 func setupTestNetCmd(c *cli.Context) error {
-	var signers, payees []common.Address
+	var signers, payees, custodians []common.Address
 
 	randomPubAccount := func() common.Address {
 		seed := make([]byte, 64)
-		_, err := rand.Read(seed)
-		if err != nil {
-			panic(err)
-		}
+		crypto.ReadRand(seed)
 		account := common.NewAddressFromSeed(seed)
 		account.PrivateViewKey = account.PublicSpendKey.DeterministicHashDerive()
 		account.PublicViewKey = account.PrivateViewKey.Public()
@@ -747,41 +880,49 @@ func setupTestNetCmd(c *cli.Context) error {
 	for i := 0; i < 7; i++ {
 		signers = append(signers, randomPubAccount())
 		payees = append(payees, randomPubAccount())
+		custodians = append(custodians, randomPubAccount())
 	}
 
 	inputs := make([]map[string]string, 0)
 	for i := range signers {
 		inputs = append(inputs, map[string]string{
-			"signer":  signers[i].String(),
-			"payee":   payees[i].String(),
-			"balance": "10000",
+			"signer":    signers[i].String(),
+			"payee":     payees[i].String(),
+			"custodian": custodians[i].String(),
+			"balance":   "13439",
 		})
 	}
+	custodian := randomPubAccount()
 	genesis := map[string]any{
-		"epoch": time.Now().Unix(),
-		"nodes": inputs,
-		"domains": []map[string]string{
-			{
-				"signer":  signers[0].String(),
-				"balance": "50000",
-			},
-		},
+		"epoch":     time.Now().Unix(),
+		"nodes":     inputs,
+		"custodian": custodian,
 	}
 	genesisData, err := json.MarshalIndent(genesis, "", "  ")
 	if err != nil {
 		return err
 	}
 	fmt.Println(string(genesisData))
+	var gns common.Genesis
+	err = json.Unmarshal(genesisData, &gns)
+	if err != nil {
+		return err
+	}
 
 	peers := make([]string, len(signers))
-	for i := range signers {
-		peers[i] = fmt.Sprintf("127.0.0.1:700%d", i+1)
+	for i, s := range signers {
+		id := s.Hash().ForNetwork(gns.NetworkId())
+		peers[i] = fmt.Sprintf("%s@127.0.0.1:585%d", id, i+1)
 	}
-	peersList := `"` + strings.Join(peers, `","`) + `"`
+	seedsList := `"` + strings.Join(peers, `","`) + `"`
 	fmt.Println(peers)
+	fmt.Printf("network: \t%s\n", gns.NetworkId())
+	fmt.Printf("custodian:\t%s\n", custodian.String())
+	fmt.Printf("view key:\t%s\n", custodian.PrivateViewKey.String())
+	fmt.Printf("spend key:\t%s\n", custodian.PrivateSpendKey.String())
 
 	for i, a := range signers {
-		dir := fmt.Sprintf("/tmp/mixin-700%d", i+1)
+		dir := fmt.Sprintf("/tmp/mixin-686%d", i+1)
 		err := os.MkdirAll(dir, 0755)
 		if err != nil {
 			return err
@@ -790,15 +931,20 @@ func setupTestNetCmd(c *cli.Context) error {
 		var configData = []byte(fmt.Sprintf(`
 [node]
 signer-key = "%s"
-consensus-only = true
-memory-cache-size = 128
-cache-ttl = 3600
-ring-cache-size = 4096
-ring-final-size = 16384
-[network]
-listener = "%s"
-peers = [%s]
-`, a.PrivateSpendKey.String(), peers[i], peersList))
+kernel-operation-period = 700
+memory-cache-size = 64
+cache-ttl = 180
+[storage]
+value-log-gc = true
+max-compaction-levels = 7
+[p2p]
+port = 585%d
+relayer = true
+seeds = [%s]
+[rpc]
+port = 686%d
+object-server = true
+`, a.PrivateSpendKey.String(), i+1, seedsList, i+1))
 
 		err = os.WriteFile(dir+"/config.toml", configData, 0644)
 		if err != nil {
@@ -812,66 +958,18 @@ peers = [%s]
 	return nil
 }
 
-var httpClient *http.Client
-
-func callRPC(node, method string, params []any, pt bool) ([]byte, error) {
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 60 * time.Second}
-	}
-
-	body, err := json.Marshal(map[string]any{
-		"method": method,
-		"params": params,
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	endpoint := "http://" + node
-	if strings.HasPrefix(node, "http") {
-		endpoint = node
-	}
-	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-
-	req.Close = true
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Runtime string `json:"runtime"`
-		Data    any    `json:"data"`
-		Error   any    `json:"error"`
-	}
-	dec := json.NewDecoder(resp.Body)
-	dec.UseNumber()
-	err = dec.Decode(&result)
-	if err != nil {
-		return nil, err
-	}
-	if result.Error != nil {
-		return nil, fmt.Errorf("ERROR %s", result.Error)
-	}
-
-	if len(result.Runtime) > 0 && pt {
-		fmt.Printf("RUNTIME: %s\n\n", result.Runtime)
-	}
-	return json.Marshal(result.Data)
+func callRPC(node, method string, params []any, _ bool) ([]byte, error) {
+	return rpc.CallMixinRPC(node, method, params)
 }
 
 type signerInput struct {
-	Inputs []struct {
+	Version uint8 `json:"version"`
+	Inputs  []struct {
 		Hash    crypto.Hash `json:"hash"`
-		Index   int         `json:"index"`
+		Index   uint        `json:"index"`
 		Deposit *struct {
 			Chain           crypto.Hash    `json:"chain"`
-			AssetKey        string         `json:"asset"`
+			AssetKey        string         `json:"asset_key"`
 			TransactionHash string         `json:"transaction"`
 			OutputIndex     uint64         `json:"index"`
 			Amount          common.Integer `json:"amount"`
@@ -892,7 +990,7 @@ type signerInput struct {
 	Node  string      `json:"-"`
 }
 
-func (raw signerInput) ReadUTXOKeys(hash crypto.Hash, index int) (*common.UTXOKeys, error) {
+func (raw signerInput) ReadUTXOKeys(hash crypto.Hash, index uint) (*common.UTXOKeys, error) {
 	utxo := &common.UTXOKeys{}
 
 	for _, in := range raw.Inputs {
@@ -920,12 +1018,8 @@ func (raw signerInput) ReadUTXOKeys(hash crypto.Hash, index int) (*common.UTXOKe
 	return utxo, nil
 }
 
-func (raw signerInput) CheckDepositInput(deposit *common.DepositData, tx crypto.Hash) error {
-	return nil
-}
-
-func (raw signerInput) ReadLastMintDistribution(group string) (*common.MintDistribution, error) {
-	return nil, nil
+func (raw signerInput) ReadDepositLock(deposit *common.DepositData) (crypto.Hash, error) {
+	return crypto.Hash{}, nil
 }
 
 func transactionToMap(tx *common.VersionedTransaction) map[string]any {
@@ -940,13 +1034,23 @@ func transactionToMap(tx *common.VersionedTransaction) map[string]any {
 			inputs = append(inputs, map[string]any{
 				"genesis": hex.EncodeToString(in.Genesis),
 			})
-		} else if in.Deposit != nil {
+		} else if d := in.Deposit; d != nil {
 			inputs = append(inputs, map[string]any{
-				"deposit": in.Deposit,
+				"deposit": map[string]any{
+					"chain":       d.Chain,
+					"asset_key":   d.AssetKey,
+					"transaction": d.Transaction,
+					"index":       d.Index,
+					"amount":      d.Amount,
+				},
 			})
-		} else if in.Mint != nil {
+		} else if m := in.Mint; m != nil {
 			inputs = append(inputs, map[string]any{
-				"mint": in.Mint,
+				"mint": map[string]any{
+					"group":  m.Group,
+					"batch":  m.Batch,
+					"amount": m.Amount,
+				},
 			})
 		}
 	}
@@ -968,22 +1072,21 @@ func transactionToMap(tx *common.VersionedTransaction) map[string]any {
 		}
 		if w := out.Withdrawal; w != nil {
 			output["withdrawal"] = map[string]any{
-				"chain":     w.Chain,
-				"asset_key": w.AssetKey,
-				"address":   w.Address,
-				"tag":       w.Tag,
+				"address": w.Address,
+				"tag":     w.Tag,
 			}
 		}
 		outputs = append(outputs, output)
 	}
 
 	tm := map[string]any{
-		"version": tx.Version,
-		"asset":   tx.Asset,
-		"inputs":  inputs,
-		"outputs": outputs,
-		"extra":   hex.EncodeToString(tx.Extra),
-		"hash":    tx.PayloadHash(),
+		"version":    tx.Version,
+		"asset":      tx.Asset,
+		"inputs":     inputs,
+		"outputs":    outputs,
+		"extra":      hex.EncodeToString(tx.Extra),
+		"hash":       tx.PayloadHash(),
+		"references": tx.References,
 	}
 	if as := tx.AggregatedSignature; as != nil {
 		tm["aggregated"] = map[string]any{
@@ -992,8 +1095,6 @@ func transactionToMap(tx *common.VersionedTransaction) map[string]any {
 		}
 	} else if tx.SignaturesMap != nil {
 		tm["signatures"] = tx.SignaturesMap
-	} else if tx.SignaturesSliceV1 != nil {
-		tm["signatures"] = tx.SignaturesSliceV1
 	}
 	return tm
 }

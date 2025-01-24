@@ -6,17 +6,27 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"runtime"
+	"strings"
 
+	"github.com/MixinNetwork/mixin/common"
 	"github.com/MixinNetwork/mixin/config"
 	"github.com/MixinNetwork/mixin/kernel"
 	"github.com/MixinNetwork/mixin/logger"
 	"github.com/MixinNetwork/mixin/rpc"
 	"github.com/MixinNetwork/mixin/storage"
-	"github.com/dgraph-io/ristretto"
+	"github.com/dgraph-io/ristretto/v2"
 	"github.com/urfave/cli/v2"
 )
 
 func main() {
+	defaultRPC := os.Getenv("MIXIN_KERNEL_RPC")
+	if defaultRPC == "" {
+		defaultRPC = "http://127.0.0.1:6860"
+	}
+	if strings.Contains(config.BuildVersion, "BUILD_VERSION") {
+		panic("please build the application using make command.")
+	}
+
 	app := cli.NewApp()
 	app.Name = "mixin"
 	app.Usage = "A free, lightning fast and decentralized network for transferring digital assets."
@@ -25,8 +35,8 @@ func main() {
 		&cli.StringFlag{
 			Name:    "node",
 			Aliases: []string{"n"},
-			Value:   "127.0.0.1:8239",
-			Usage:   "the node RPC endpoint",
+			Value:   defaultRPC,
+			Usage:   "the RPC endpoint, and the default value is read from environment variable MIXIN_KERNEL_RPC",
 		},
 		&cli.StringFlag{
 			Name:    "dir",
@@ -55,7 +65,7 @@ func main() {
 				&cli.IntFlag{
 					Name:    "port",
 					Aliases: []string{"p"},
-					Value:   7239,
+					Value:   123,
 					Usage:   "the peer port to listen",
 				},
 				&cli.IntFlag{
@@ -91,6 +101,14 @@ func main() {
 				&cli.StringFlag{
 					Name:  "spend",
 					Usage: "the private spend key `HEX` instead of a random one",
+				},
+				&cli.StringFlag{
+					Name:  "prefix",
+					Usage: "a string prefix the final address should have",
+				},
+				&cli.StringFlag{
+					Name:  "suffix",
+					Usage: "a string suffix the final address should have",
 				},
 			},
 		},
@@ -260,6 +278,45 @@ func main() {
 			},
 		},
 		{
+			Name:   "signcustodiandeposit",
+			Usage:  "Sign a deposit transaction with a single custodian key",
+			Action: custodianDepositCmd,
+			Flags: []cli.Flag{
+				&cli.StringFlag{
+					Name:  "receiver",
+					Usage: "the receiver address of the deposit",
+				},
+				&cli.StringFlag{
+					Name:  "custodian",
+					Usage: "the custodian private view and spend key hex",
+				},
+				&cli.StringFlag{
+					Name:  "asset",
+					Usage: "the deposit asset id",
+				},
+				&cli.StringFlag{
+					Name:  "chain",
+					Usage: "the deposit chain id",
+				},
+				&cli.StringFlag{
+					Name:  "asset_key",
+					Usage: "the deposit asset key",
+				},
+				&cli.StringFlag{
+					Name:  "transaction",
+					Usage: "the deposit transaction hash",
+				},
+				&cli.Uint64Flag{
+					Name:  "index",
+					Usage: "the deposit transaction output index",
+				},
+				&cli.StringFlag{
+					Name:  "amount",
+					Usage: "the deposit amount",
+				},
+			},
+		},
+		{
 			Name:   "buildnodepledgetransaction",
 			Usage:  "Build the transaction to pledge a node",
 			Action: pledgeNodeCmd,
@@ -325,6 +382,29 @@ func main() {
 				&cli.StringFlag{
 					Name:  "raw",
 					Usage: "the raw pledge transaction",
+				},
+			},
+		},
+		{
+			Name:   "encodecustodianextra",
+			Usage:  "Encode the custodian node transaction extra",
+			Action: encodeCustodianExtraCmd,
+			Flags: []cli.Flag{
+				&cli.StringFlag{
+					Name:  "signer",
+					Usage: "the private spend key of the kernel signer",
+				},
+				&cli.StringFlag{
+					Name:  "payee",
+					Usage: "the private spend key of the kernel payee",
+				},
+				&cli.StringFlag{
+					Name:  "custodian",
+					Usage: "the private spend key of the custodian node",
+				},
+				&cli.StringFlag{
+					Name:  "network",
+					Usage: "the network id",
 				},
 			},
 		},
@@ -435,6 +515,37 @@ func main() {
 			},
 		},
 		{
+			Name:   "getdeposittransaction",
+			Usage:  "Get the deposit transaction by external chain transaction",
+			Action: getDepositTransactionCmd,
+			Flags: []cli.Flag{
+				&cli.StringFlag{
+					Name:  "chain",
+					Usage: "the chain hash",
+				},
+				&cli.StringFlag{
+					Name:  "hash",
+					Usage: "the external chain transaction hash",
+				},
+				&cli.IntFlag{
+					Name:  "index",
+					Usage: "the external chain transaction output index",
+				},
+			},
+		},
+		{
+			Name:   "getwithdrawalclaim",
+			Usage:  "Get the claim transaction for a withdrawal submit",
+			Action: getWithdrawalClaimCmd,
+			Flags: []cli.Flag{
+				&cli.StringFlag{
+					Name:    "hash",
+					Aliases: []string{"x"},
+					Usage:   "the withdrawal submit transaction hash",
+				},
+			},
+		},
+		{
 			Name:   "getutxo",
 			Usage:  "Get the UTXO by hash and index",
 			Action: getUTXOCmd,
@@ -463,6 +574,23 @@ func main() {
 					Usage:   "the ghost key",
 				},
 			},
+		},
+		{
+			Name:   "getasset",
+			Usage:  "Get the asset and balance",
+			Action: getAssetCmd,
+			Flags: []cli.Flag{
+				&cli.StringFlag{
+					Name:  "id",
+					Usage: "the asset id",
+				},
+			},
+		},
+		{
+			Name:   "listcustodianupdates",
+			Usage:  "List all custodian updates",
+			Action: listCustodianUpdatesCmd,
+			Flags:  []cli.Flag{},
 		},
 		{
 			Name:   "listmintworks",
@@ -528,6 +656,17 @@ func main() {
 			Action: listPeersCmd,
 		},
 		{
+			Name:   "listrelayers",
+			Usage:  "List the remote relayers for peer",
+			Action: listRelayersCmd,
+			Flags: []cli.Flag{
+				&cli.StringFlag{
+					Name:  "id",
+					Usage: "the peer node id",
+				},
+			},
+		},
+		{
 			Name:   "dumpgraphhead",
 			Usage:  "Dump the graph head",
 			Action: dumpGraphHeadCmd,
@@ -541,12 +680,22 @@ func main() {
 
 func kernelCmd(c *cli.Context) error {
 	runtime.GOMAXPROCS(runtime.NumCPU())
-
-	logger.SetLevel(c.Int("log"))
-	err := logger.SetFilter(c.String("filter"))
+	err := os.Setenv("QUIC_GO_DISABLE_GSO", "true")
 	if err != nil {
 		return err
 	}
+
+	logger.SetLevel(c.Int("log"))
+	err = logger.SetFilter(c.String("filter"))
+	if err != nil {
+		return err
+	}
+
+	gns, err := common.ReadGenesis(c.String("dir") + "/genesis.json")
+	if err != nil {
+		return err
+	}
+
 	custom, err := config.Initialize(c.String("dir") + "/config.toml")
 	if err != nil {
 		return err
@@ -563,30 +712,26 @@ func kernelCmd(c *cli.Context) error {
 	}
 	defer store.Close()
 
-	addr := fmt.Sprintf(":%d", c.Int("port"))
-	node, err := kernel.SetupNode(custom, store, cache, addr, c.String("dir"))
+	node, err := kernel.SetupNode(custom, store, cache, gns)
 	if err != nil {
 		return err
 	}
 
-	go func() {
-		server := rpc.NewServer(custom, store, node, c.Int("port")+1000)
-		err := server.ListenAndServe()
-		if err != nil {
-			panic(err)
-		}
-	}()
+	if p := custom.RPC.Port; p > 0 {
+		server := rpc.NewServer(custom, store, node, p)
+		go server.ListenAndServe()
+	}
 
-	if custom.Dev.Profile {
-		go http.ListenAndServe(fmt.Sprintf(":%d", c.Int("port")+2000), http.DefaultServeMux)
+	if p := custom.Dev.Port; p > 0 {
+		go http.ListenAndServe(fmt.Sprintf(":%d", p), http.DefaultServeMux)
 	}
 
 	return node.Loop()
 }
 
-func newCache(conf *config.Custom) (*ristretto.Cache, error) {
+func newCache(conf *config.Custom) (*ristretto.Cache[[]byte, any], error) {
 	cost := int64(conf.Node.MemoryCacheSize * 1024 * 1024)
-	return ristretto.NewCache(&ristretto.Config{
+	return ristretto.NewCache(&ristretto.Config[[]byte, any]{
 		NumCounters: cost / 1024 * 10,
 		MaxCost:     cost,
 		BufferItems: 64,

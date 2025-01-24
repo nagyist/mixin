@@ -1,11 +1,9 @@
 package kernel
 
 import (
-	"bytes"
-	"encoding/binary"
 	"fmt"
 	"sort"
-	"time"
+	"sync"
 
 	"github.com/MixinNetwork/mixin/common"
 	"github.com/MixinNetwork/mixin/config"
@@ -20,7 +18,8 @@ type CacheRound struct {
 	Number     uint64
 	Timestamp  uint64
 	References *common.RoundLink
-	Snapshots  []*common.Snapshot `msgpack:"-"`
+	Snapshots  []*common.Snapshot
+	index      *roundIndexCache
 }
 
 type FinalRound struct {
@@ -32,7 +31,7 @@ type FinalRound struct {
 }
 
 func (node *Node) LoadAllChainsAndGraphTimestamp(store storage.Store, networkId crypto.Hash) error {
-	nodes := node.NodesListWithoutState(uint64(clock.Now().UnixNano()), false)
+	nodes := node.NodesListWithoutState(clock.NowUnixNano(), false)
 	for _, cn := range nodes {
 		chain := node.getOrCreateChain(cn.IdForNetwork)
 		if chain.State == nil {
@@ -98,6 +97,7 @@ func loadHeadRoundForNode(store storage.Store, nodeIdWithNetwork crypto.Hash) (*
 		Number:     meta.Number,
 		Timestamp:  meta.Timestamp,
 		References: meta.References,
+		index:      newRoundIndexCache(),
 	}
 	topos, err := store.ReadSnapshotsForNodeRound(round.NodeId, round.Number)
 	if err != nil {
@@ -107,6 +107,7 @@ func loadHeadRoundForNode(store storage.Store, nodeIdWithNetwork crypto.Hash) (*
 		s := t.Snapshot
 		s.Hash = s.PayloadHash()
 		round.Snapshots = append(round.Snapshots, s)
+		round.index.Store(s.Hash)
 	}
 	return round, nil
 }
@@ -144,6 +145,7 @@ func (c *CacheRound) Copy() *CacheRound {
 			External: c.References.External,
 		},
 		Snapshots: append([]*common.Snapshot{}, c.Snapshots...),
+		index:     c.index,
 	}
 }
 
@@ -186,10 +188,12 @@ func (c *CacheRound) Gap() (uint64, uint64) {
 
 func (chain *Chain) AddSnapshot(final *FinalRound, cache *CacheRound, s *common.Snapshot, signers []crypto.Hash) error {
 	chain.node.TopoWrite(s, signers)
-	if err := cache.validateSnapshot(s, true); err != nil {
-		panic("should never be here")
+	err := cache.validateSnapshot(s, true)
+	if err != nil {
+		panic(err)
 	}
 	chain.assignNewGraphRound(final, cache)
+	chain.State.CacheRound.index.Store(s.Hash)
 	return nil
 }
 
@@ -201,13 +205,11 @@ func (c *CacheRound) validateSnapshot(s *common.Snapshot, add bool) error {
 	if s.RoundNumber != c.Number || !s.Hash.HasValue() {
 		panic(s)
 	}
-	day := uint64(time.Hour) * 24
-	fork := uint64(SnapshotRoundDayLeapForkHack.UnixNano())
 	for _, cs := range c.Snapshots {
 		if cs.Hash == s.Hash || cs.Timestamp == s.Timestamp || cs.SoleTransaction() == s.SoleTransaction() {
 			return fmt.Errorf("ValidateSnapshot error duplication %s %d %s", s.Hash, s.Timestamp, s.SoleTransaction())
 		}
-		if cs.Timestamp >= fork && cs.Timestamp/day != s.Timestamp/day {
+		if cs.Timestamp/OneDay != s.Timestamp/OneDay {
 			return fmt.Errorf("ValidateSnapshot error round day leap %s %d %s", s.Hash, s.Timestamp, s.SoleTransaction())
 		}
 	}
@@ -225,60 +227,12 @@ func (c *CacheRound) validateSnapshot(s *common.Snapshot, add bool) error {
 	return nil
 }
 
-func ComputeRoundHash(nodeId crypto.Hash, number uint64, snapshots []*common.Snapshot) (uint64, uint64, crypto.Hash) {
-	sort.Slice(snapshots, func(i, j int) bool {
-		if snapshots[i].Timestamp < snapshots[j].Timestamp {
-			return true
-		}
-		if snapshots[i].Timestamp > snapshots[j].Timestamp {
-			return false
-		}
-		a, b := snapshots[i].Hash, snapshots[j].Hash
-		return bytes.Compare(a[:], b[:]) < 0
-	})
-	start := snapshots[0].Timestamp
-	end := snapshots[len(snapshots)-1].Timestamp
-	if end >= start+config.SnapshotRoundGap {
-		err := fmt.Errorf("ComputeRoundHash(%s, %d) %d %d %d", nodeId, number, start, end, start+config.SnapshotRoundGap)
-		panic(err)
-	}
-
-	version := snapshots[0].Version
-	for _, s := range snapshots {
-		if s.Version > version {
-			version = s.Version
-		}
-	}
-
-	var hash crypto.Hash
-	buf := binary.BigEndian.AppendUint64(nodeId[:], number)
-	if version < common.SnapshotVersionCommonEncoding {
-		hash = crypto.NewHash(buf)
-	} else {
-		hash = crypto.Blake3Hash(buf)
-	}
-	for _, s := range snapshots {
-		if s.Version > version {
-			panic(nodeId)
-		}
-		if s.Timestamp > end {
-			panic(nodeId)
-		}
-		if version < common.SnapshotVersionCommonEncoding {
-			hash = crypto.NewHash(append(hash[:], s.Hash[:]...))
-		} else {
-			hash = crypto.Blake3Hash(append(hash[:], s.Hash[:]...))
-		}
-	}
-	return start, end, hash
-}
-
 func (c *CacheRound) asFinal() *FinalRound {
 	if len(c.Snapshots) == 0 {
 		return nil
 	}
 
-	start, end, hash := ComputeRoundHash(c.NodeId, c.Number, c.Snapshots)
+	start, end, hash := common.ComputeRoundHash(c.NodeId, c.Number, c.Snapshots)
 	round := &FinalRound{
 		NodeId: c.NodeId,
 		Number: c.Number,
@@ -287,4 +241,31 @@ func (c *CacheRound) asFinal() *FinalRound {
 		Hash:   hash,
 	}
 	return round
+}
+
+type roundIndexCache struct {
+	lock *sync.RWMutex
+	m    map[crypto.Hash]struct{}
+}
+
+func newRoundIndexCache() *roundIndexCache {
+	return &roundIndexCache{
+		lock: new(sync.RWMutex),
+		m:    make(map[crypto.Hash]struct{}),
+	}
+}
+
+func (ric *roundIndexCache) Store(snap crypto.Hash) {
+	ric.lock.Lock()
+	defer ric.lock.Unlock()
+
+	ric.m[snap] = struct{}{}
+}
+
+func (ric *roundIndexCache) Check(snap crypto.Hash) bool {
+	ric.lock.RLock()
+	defer ric.lock.RUnlock()
+
+	_, found := ric.m[snap]
+	return found
 }

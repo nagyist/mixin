@@ -20,7 +20,7 @@ To boot a fresh Mixin Kernel Full Node, you need to generate your keys, send the
 
 6. Send the pledge transaction to any other running Kernel Node, if it fails due to pending node operations, wait and try again.
 
-7. If your pledge transaction succeed, you can run the daemon `mixin kernel -d ~/mixin`.
+7. If your pledge transaction succeeds, you can run the daemon `mixin kernel -d ~/mixin`.
 
 ## Kernel Concepts
 
@@ -96,7 +96,7 @@ When a new Kernel Year starts or a resign transaction gets snapshot, the Kernel 
 
 - **inputs**: the single accept transaction output as the only input.
 
-- **outputs**: one single output with type `0xa6`, the exact accept transaction amount, script `0xfffe01`, keys and mask should be derived from the payee.
+- **outputs**: one single output with type `0xa6`, the exact accepted transaction amount, script `0xfffe01`, keys and mask should be derived from the payee.
 
 - **extra**: 64 bytes same as the accept transaction extra.
 

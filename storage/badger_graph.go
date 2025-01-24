@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"sort"
 
@@ -9,29 +10,141 @@ import (
 	"github.com/MixinNetwork/mixin/config"
 	"github.com/MixinNetwork/mixin/crypto"
 	"github.com/MixinNetwork/mixin/logger"
-	"github.com/dgraph-io/badger/v3"
+	"github.com/dgraph-io/badger/v4"
 )
 
 const (
-	graphPrefixGhost           = "GHOST" // each output key should only be used once
-	graphPrefixUTXO            = "UTXO"  // unspent outputs, including first consumed transaction hash
-	graphPrefixDeposit         = "DEPOSIT"
-	graphPrefixMint            = "MINT"
-	graphPrefixTransaction     = "TRANSACTION"  // raw transaction, may not be finalized yet, if finalized with first finalized snapshot hash
-	graphPrefixFinalization    = "FINALIZATION" // transaction finalization hack
-	graphPrefixUnique          = "UNIQUE"       // unique transaction in one node
-	graphPrefixRound           = "ROUND"        // hash|node-if-cache {node:hash,number:734,references:{self-parent-round-hash,external-round-hash}}
-	graphPrefixSnapshot        = "SNAPSHOT"     //
-	graphPrefixLink            = "LINK"         // self-external number
-	graphPrefixTopology        = "TOPOLOGY"
-	graphPrefixSnapTopology    = "SNAPTOPO"
-	graphPrefixWorkLead        = "WORKPROPOSE"
-	graphPrefixWorkSign        = "WORKVOTE"
-	graphPrefixWorkOffset      = "WORKCHECKPOINT"
-	graphPrefixWorkSnapshot    = "WORKSNAPSHOT"
-	graphPrefixSpaceCheckpoint = "SPACECHECKPOINT"
-	graphPrefixSpaceQueue      = "SPACEQUEUE"
+	graphPrefixGhost             = "GHOST" // each output key should only be used once
+	graphPrefixUTXO              = "UTXO"  // unspent outputs, including first consumed transaction hash
+	graphPrefixDeposit           = "DEPOSIT"
+	graphPrefixWithdrawal        = "WITHDRAWAL"
+	graphPrefixMint              = "MINTUNIVERSAL"
+	graphPrefixTransaction       = "TRANSACTION"  // raw transaction, may not be finalized yet, if finalized with first finalized snapshot hash
+	graphPrefixFinalization      = "FINALIZATION" // transaction finalization hack
+	graphPrefixUnique            = "UNIQUE"       // unique transaction in one node
+	graphPrefixRound             = "ROUND"        // hash|node-if-cache {node:hash,number:734,references:{self-parent-round-hash,external-round-hash}}
+	graphPrefixSnapshot          = "SNAPSHOT"     //
+	graphPrefixLink              = "LINK"         // self-external number
+	graphPrefixTopology          = "TOPOLOGY"
+	graphPrefixSnapTopology      = "SNAPTOPO"
+	graphPrefixWorkLead          = "WORKPROPOSE"
+	graphPrefixWorkSign          = "WORKVOTE"
+	graphPrefixWorkOffset        = "WORKCHECKPOINT"
+	graphPrefixWorkSnapshot      = "WORKSNAPSHOT"
+	graphPrefixSpaceCheckpoint   = "SPACECHECKPOINT"
+	graphPrefixSpaceQueue        = "SPACEQUEUE"
+	graphPrefixAssetInfo         = "ASSETINFO"
+	graphPrefixAssetTotal        = "ASSETTOTAL"
+	graphPrefixCustodianUpdate   = "CUSTODIANUPDATE"
+	graphPrefixConsensusSnapshot = "CONSENSUSSNAPSHOT"
 )
+
+func (s *BadgerStore) WriteConsensusSnapshot(snap *common.Snapshot, tx *common.VersionedTransaction, hack *common.Snapshot) error {
+	txn := s.snapshotsDB.NewTransaction(true)
+	defer txn.Discard()
+
+	err := writeConsensusSnapshot(txn, snap, tx, hack)
+	if err != nil {
+		return err
+	}
+	return txn.Commit()
+}
+
+func writeConsensusSnapshot(txn *badger.Txn, snap *common.Snapshot, tx *common.VersionedTransaction, hack *common.Snapshot) error {
+	if snap.SoleTransaction() != tx.PayloadHash() {
+		panic(snap.PayloadHash())
+	}
+	if len(tx.Inputs) == 1 && tx.Inputs[0].Mint != nil {
+		logger.Printf("writeConsensusSnapshot(%s) => mint", snap.SoleTransaction())
+	} else {
+		out := tx.Outputs[0]
+		switch out.Type {
+		case common.OutputTypeNodePledge:
+		case common.OutputTypeNodeCancel:
+		case common.OutputTypeNodeAccept:
+		case common.OutputTypeNodeRemove:
+		case common.OutputTypeCustodianUpdateNodes:
+		case common.OutputTypeCustodianSlashNodes:
+		default:
+			panic(out.Type)
+		}
+		logger.Printf("writeConsensusSnapshot(%s) => %d", snap.SoleTransaction(), out.Type)
+	}
+
+	isGenesis := len(tx.Inputs) == 1 && tx.Inputs[0].Genesis != nil
+	last, err := readLastConsensusSnapshot(txn)
+	if err != nil {
+		return err
+	}
+	if hack != nil {
+		if last != nil {
+			panic(snap.PayloadHash())
+		}
+		last = hack
+	}
+
+	if !isGenesis {
+		if last.SoleTransaction() == tx.PayloadHash() {
+			return nil
+		}
+		if last.SoleTransaction() != tx.References[0] {
+			panic(snap.PayloadHash())
+		}
+		if last.Timestamp >= snap.Timestamp {
+			panic(snap.PayloadHash())
+		}
+		key := graphConsensusSnapshotKey(last.Timestamp, last.PayloadHash())
+		val := tx.PayloadHash()
+		err := txn.Set(key, val[:])
+		if err != nil {
+			return err
+		}
+	}
+
+	key := graphConsensusSnapshotKey(snap.Timestamp, snap.PayloadHash())
+	return txn.Set(key, []byte{})
+}
+
+func (s *BadgerStore) ReadLastConsensusSnapshot() (*common.Snapshot, error) {
+	txn := s.snapshotsDB.NewTransaction(false)
+	defer txn.Discard()
+
+	return readLastConsensusSnapshot(txn)
+}
+
+func readLastConsensusSnapshot(txn *badger.Txn) (*common.Snapshot, error) {
+	opts := badger.DefaultIteratorOptions
+	opts.PrefetchValues = false
+	opts.Reverse = true
+
+	it := txn.NewIterator(opts)
+	defer it.Close()
+
+	it.Seek(graphConsensusSnapshotKey(^uint64(0), crypto.Hash{}))
+	if !it.ValidForPrefix([]byte(graphPrefixConsensusSnapshot)) {
+		return nil, nil
+	}
+	var h crypto.Hash
+	key := it.Item().KeyCopy(nil)
+	copy(h[:], key[len(graphPrefixConsensusSnapshot)+8:])
+	snap, err := readSnapshotWithTopo(txn, h)
+	if err != nil {
+		return nil, err
+	}
+	ts := binary.BigEndian.Uint64(key[len(graphPrefixConsensusSnapshot):])
+	if snap.Timestamp != ts {
+		panic(snap.PayloadHash())
+	}
+
+	val, err := it.Item().ValueCopy(nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(val) > 0 {
+		panic(hex.EncodeToString(val))
+	}
+	return snap.Snapshot, nil
+}
 
 func (s *BadgerStore) RemoveGraphEntries(prefix string) (int, error) {
 	txn := s.snapshotsDB.NewTransaction(true)
@@ -82,7 +195,7 @@ func readSnapshotsForNodeRound(txn *badger.Txn, nodeId crypto.Hash, round uint64
 		if err != nil {
 			return snapshots, err
 		}
-		s, err := common.DecompressUnmarshalVersionedSnapshot(v)
+		s, err := common.UnmarshalVersionedSnapshot(v)
 		if err != nil {
 			return snapshots, err
 		}
@@ -96,6 +209,9 @@ func readSnapshotsForNodeRound(txn *badger.Txn, nodeId crypto.Hash, round uint64
 
 func (s *BadgerStore) WriteSnapshot(snap *common.SnapshotWithTopologicalOrder, signers []crypto.Hash) error {
 	logger.Debugf("BadgerStore.WriteSnapshot(%v)", snap.Snapshot)
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	txn := s.snapshotsDB.NewTransaction(true)
 	defer txn.Discard()
 
@@ -157,7 +273,7 @@ func writeSnapshot(txn *badger.Txn, snap *common.SnapshotWithTopologicalOrder, v
 	}
 
 	key := graphSnapshotKey(snap.NodeId, snap.RoundNumber, snap.SoleTransaction())
-	val := snap.VersionedCompressMarshal()
+	val := snap.VersionedMarshal()
 	err = txn.Set(key, val)
 	if err != nil {
 		return err
@@ -176,4 +292,10 @@ func graphSnapshotKey(nodeId crypto.Hash, round uint64, hash crypto.Hash) []byte
 	key := append([]byte(graphPrefixSnapshot), nodeId[:]...)
 	key = binary.BigEndian.AppendUint64(key, round)
 	return append(key, hash[:]...)
+}
+
+func graphConsensusSnapshotKey(ts uint64, snap crypto.Hash) []byte {
+	key := []byte(graphPrefixConsensusSnapshot)
+	key = binary.BigEndian.AppendUint64(key, ts)
+	return append(key, snap[:]...)
 }

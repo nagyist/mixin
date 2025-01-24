@@ -2,278 +2,70 @@ package rpc
 
 import (
 	"encoding/hex"
-	"errors"
-	"fmt"
-	"strconv"
+	"encoding/json"
 
 	"github.com/MixinNetwork/mixin/common"
 	"github.com/MixinNetwork/mixin/crypto"
-	"github.com/MixinNetwork/mixin/kernel"
-	"github.com/MixinNetwork/mixin/storage"
 )
 
-func getCacheTransaction(store storage.Store, params []any) (map[string]any, error) {
-	if len(params) != 1 {
-		return nil, errors.New("invalid params count")
+func GetSnapshot(rpc, hash string) (*common.SnapshotWithTopologicalOrder, error) {
+	raw, err := CallMixinRPC(rpc, "getsnapshot", []any{hash})
+	if err != nil || raw == nil {
+		return nil, err
 	}
-	hash, err := crypto.HashFromString(fmt.Sprint(params[0]))
+	var signed map[string]any
+	err = json.Unmarshal(raw, &signed)
 	if err != nil {
-		return nil, err
+		panic(string(raw))
 	}
-	tx, err := store.CacheGetTransaction(hash)
-	if err != nil || tx == nil {
-		return nil, err
+	hex, err := hex.DecodeString(signed["hex"].(string))
+	if err != nil {
+		panic(string(raw))
 	}
-	data := transactionToMap(tx)
-	data["hex"] = hex.EncodeToString(tx.Marshal())
-	return data, nil
+	ver, err := common.UnmarshalVersionedSnapshot(hex)
+	if err != nil {
+		panic(string(raw))
+	}
+	return ver, nil
 }
 
-func queueTransaction(node *kernel.Node, params []any) (string, error) {
-	if len(params) != 1 {
-		return "", errors.New("invalid params count")
+func GetTransaction(rpc, hash string) (*common.VersionedTransaction, string, error) {
+	raw, err := CallMixinRPC(rpc, "gettransaction", []any{hash})
+	if err != nil || raw == nil {
+		return nil, "", err
 	}
-	raw, err := hex.DecodeString(fmt.Sprint(params[0]))
+	var signed map[string]any
+	err = json.Unmarshal(raw, &signed)
 	if err != nil {
-		return "", err
+		panic(string(raw))
 	}
-	ver, err := common.UnmarshalVersionedTransaction(raw)
+	hex, err := hex.DecodeString(signed["hex"].(string))
 	if err != nil {
-		return "", err
+		panic(string(raw))
 	}
-	return node.QueueTransaction(ver)
+	ver, err := common.UnmarshalVersionedTransaction(hex)
+	if err != nil {
+		panic(string(raw))
+	}
+	if signed["snapshot"] == nil {
+		return ver, "", nil
+	}
+	return ver, signed["snapshot"].(string), nil
 }
 
-func getTransaction(store storage.Store, params []any) (map[string]any, error) {
-	if len(params) != 1 {
-		return nil, errors.New("invalid params count")
-	}
-	hash, err := crypto.HashFromString(fmt.Sprint(params[0]))
+func SendRawTransaction(rpc, raw string) (crypto.Hash, error) {
+	body, err := CallMixinRPC(rpc, "sendrawtransaction", []any{raw})
 	if err != nil {
-		return nil, err
+		return crypto.Hash{}, err
 	}
-	tx, snap, err := store.ReadTransaction(hash)
-	if err != nil || tx == nil {
-		return nil, err
-	}
-	data := transactionToMap(tx)
-	data["hex"] = hex.EncodeToString(tx.Marshal())
-	if len(snap) > 0 {
-		data["snapshot"] = snap
-	}
-	return data, nil
-}
-
-func getUTXO(store storage.Store, params []any) (map[string]any, error) {
-	if len(params) != 2 {
-		return nil, errors.New("invalid params count")
-	}
-	hash, err := crypto.HashFromString(fmt.Sprint(params[0]))
+	var tx map[string]string
+	err = json.Unmarshal(body, &tx)
 	if err != nil {
-		return nil, err
+		panic(string(body))
 	}
-	index, err := strconv.ParseUint(fmt.Sprint(params[1]), 10, 64)
-	if err != nil {
-		return nil, err
+	hash, err := crypto.HashFromString(tx["hash"])
+	if err != nil || !hash.HasValue() {
+		panic(string(body))
 	}
-	utxo, err := store.ReadUTXOLock(hash, int(index))
-	if err != nil || utxo == nil {
-		return nil, err
-	}
-
-	output := map[string]any{
-		"type":   utxo.Type,
-		"hash":   hash,
-		"index":  index,
-		"amount": utxo.Amount,
-	}
-	if len(utxo.Keys) > 0 {
-		output["keys"] = utxo.Keys
-	}
-	if len(utxo.Script) > 0 {
-		output["script"] = utxo.Script
-	}
-	if utxo.Mask.HasValue() {
-		output["mask"] = utxo.Mask
-	}
-	if utxo.LockHash.HasValue() {
-		output["lock"] = utxo.LockHash
-	}
-	return output, nil
-}
-
-func getGhostKey(store storage.Store, params []any) (map[string]any, error) {
-	if len(params) != 1 {
-		return nil, errors.New("invalid params count")
-	}
-	key, err := crypto.KeyFromString(fmt.Sprint(params[0]))
-	if err != nil {
-		return nil, err
-	}
-	by, err := store.CheckGhost(key)
-	if err != nil {
-		return nil, err
-	}
-	res := map[string]any{"transaction": nil}
-	if by != nil {
-		res["transaction"] = by.String()
-	}
-	return res, nil
-}
-
-func getSnapshot(node *kernel.Node, store storage.Store, params []any) (map[string]any, error) {
-	if len(params) != 1 {
-		return nil, errors.New("invalid params count")
-	}
-	hash, err := crypto.HashFromString(fmt.Sprint(params[0]))
-	if err != nil {
-		return nil, err
-	}
-	snap, err := store.ReadSnapshot(hash)
-	if err != nil || snap == nil {
-		return nil, err
-	}
-	tx, _, err := store.ReadTransaction(snap.SoleTransaction())
-	if err != nil {
-		return nil, err
-	}
-	return snapshotToMap(node, snap, tx, true), nil
-}
-
-func listSnapshots(node *kernel.Node, store storage.Store, params []any) ([]map[string]any, error) {
-	if len(params) != 4 {
-		return nil, errors.New("invalid params count")
-	}
-	offset, err := strconv.ParseUint(fmt.Sprint(params[0]), 10, 64)
-	if err != nil {
-		return nil, err
-	}
-	count, err := strconv.ParseUint(fmt.Sprint(params[1]), 10, 64)
-	if err != nil {
-		return nil, err
-	}
-	sig, err := strconv.ParseBool(fmt.Sprint(params[2]))
-	if err != nil {
-		return nil, err
-	}
-	tx, err := strconv.ParseBool(fmt.Sprint(params[3]))
-	if err != nil {
-		return nil, err
-	}
-
-	if tx {
-		snapshots, transactions, err := store.ReadSnapshotWithTransactionsSinceTopology(offset, count)
-		return snapshotsToMap(node, snapshots, transactions, sig), err
-	}
-	snapshots, err := store.ReadSnapshotsSinceTopology(offset, count)
-	return snapshotsToMap(node, snapshots, nil, sig), err
-}
-
-func snapshotsToMap(node *kernel.Node, snapshots []*common.SnapshotWithTopologicalOrder, transactions []*common.VersionedTransaction, sig bool) []map[string]any {
-	tx := len(transactions) == len(snapshots)
-	result := make([]map[string]any, len(snapshots))
-	for i, s := range snapshots {
-		if tx {
-			result[i] = snapshotToMap(node, s, transactions[i], sig)
-		} else {
-			result[i] = snapshotToMap(node, s, nil, sig)
-		}
-	}
-	return result
-}
-
-func snapshotToMap(node *kernel.Node, s *common.SnapshotWithTopologicalOrder, tx *common.VersionedTransaction, sig bool) map[string]any {
-	wn := node.WitnessSnapshot(s)
-	item := map[string]any{
-		"version":    s.Version,
-		"node":       s.NodeId,
-		"references": roundLinkToMap(s.References),
-		"round":      s.RoundNumber,
-		"timestamp":  s.Timestamp,
-		"hash":       s.Hash,
-		"hex":        hex.EncodeToString(s.VersionedMarshal()),
-		"topology":   s.TopologicalOrder,
-		"witness": map[string]any{
-			"signature": wn.Signature,
-			"timestamp": wn.Timestamp,
-		},
-	}
-	if tx != nil {
-		item["transaction"] = transactionToMap(tx)
-	} else {
-		item["transaction"] = s.SoleTransaction()
-	}
-	if s.Version >= common.SnapshotVersionCommonEncoding {
-		item["transactions"] = []any{item["transaction"]}
-	}
-	if sig && s.Version == 0 {
-		item["signatures"] = s.Signatures
-	}
-	if sig && s.Version >= common.SnapshotVersionMsgpackEncoding {
-		item["signature"] = s.Signature
-	}
-	return item
-}
-
-func transactionToMap(tx *common.VersionedTransaction) map[string]any {
-	var inputs []map[string]any
-	for _, in := range tx.Inputs {
-		if in.Hash.HasValue() {
-			inputs = append(inputs, map[string]any{
-				"hash":  in.Hash,
-				"index": in.Index,
-			})
-		} else if len(in.Genesis) > 0 {
-			inputs = append(inputs, map[string]any{
-				"genesis": hex.EncodeToString(in.Genesis),
-			})
-		} else if in.Deposit != nil {
-			inputs = append(inputs, map[string]any{
-				"deposit": in.Deposit,
-			})
-		} else if in.Mint != nil {
-			inputs = append(inputs, map[string]any{
-				"mint": in.Mint,
-			})
-		}
-	}
-
-	var outputs []map[string]any
-	for _, out := range tx.Outputs {
-		output := map[string]any{
-			"type":   out.Type,
-			"amount": out.Amount,
-		}
-		if len(out.Keys) > 0 {
-			output["keys"] = out.Keys
-		}
-		if len(out.Script) > 0 {
-			output["script"] = out.Script
-		}
-		if out.Mask.HasValue() {
-			output["mask"] = out.Mask
-		}
-		if w := out.Withdrawal; w != nil {
-			output["withdrawal"] = map[string]any{
-				"chain":     w.Chain,
-				"asset_key": w.AssetKey,
-				"address":   w.Address,
-				"tag":       w.Tag,
-			}
-		}
-		outputs = append(outputs, output)
-	}
-
-	tm := map[string]any{
-		"version": tx.Version,
-		"asset":   tx.Asset,
-		"inputs":  inputs,
-		"outputs": outputs,
-		"extra":   hex.EncodeToString(tx.Extra),
-		"hash":    tx.PayloadHash(),
-	}
-	if tx.Version >= common.TxVersionReferences {
-		tm["references"] = tx.References
-	}
-	return tm
+	return hash, nil
 }

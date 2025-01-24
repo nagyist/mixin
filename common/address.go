@@ -10,7 +10,7 @@ import (
 	"github.com/MixinNetwork/mixin/util/base58"
 )
 
-const MainNetworkId = "XIN"
+const MainAddressPrefix = "XIN"
 
 type Address struct {
 	PrivateSpendKey crypto.Key
@@ -20,8 +20,8 @@ type Address struct {
 }
 
 func NewAddressFromSeed(seed []byte) Address {
-	hash1 := crypto.NewHash(seed)
-	hash2 := crypto.NewHash(hash1[:])
+	hash1 := crypto.Sha256Hash(seed)
+	hash2 := crypto.Sha256Hash(hash1[:])
 	src := append(hash1[:], hash2[:]...)
 	spend := crypto.NewKeyFromSeed(seed)
 	view := crypto.NewKeyFromSeed(src)
@@ -36,33 +36,39 @@ func NewAddressFromSeed(seed []byte) Address {
 
 func NewAddressFromString(s string) (Address, error) {
 	var a Address
-	if !strings.HasPrefix(s, MainNetworkId) {
+	if !strings.HasPrefix(s, MainAddressPrefix) {
 		return a, errors.New("invalid address network")
 	}
-	data := base58.Decode(s[len(MainNetworkId):])
+	data := base58.Decode(s[len(MainAddressPrefix):])
 	if len(data) != 68 {
 		return a, errors.New("invalid address format")
 	}
-	checksum := crypto.NewHash(append([]byte(MainNetworkId), data[:64]...))
+	checksum := crypto.Sha256Hash(append([]byte(MainAddressPrefix), data[:64]...))
 	if !bytes.Equal(checksum[:4], data[64:]) {
 		return a, errors.New("invalid address checksum")
 	}
 	copy(a.PublicSpendKey[:], data[:32])
+	if !a.PublicSpendKey.CheckKey() {
+		return a, errors.New("invalid address public spend key")
+	}
 	copy(a.PublicViewKey[:], data[32:])
+	if !a.PublicViewKey.CheckKey() {
+		return a, errors.New("invalid address public view key")
+	}
 	return a, nil
 }
 
 func (a Address) String() string {
-	data := append([]byte(MainNetworkId), a.PublicSpendKey[:]...)
+	data := append([]byte(MainAddressPrefix), a.PublicSpendKey[:]...)
 	data = append(data, a.PublicViewKey[:]...)
-	checksum := crypto.NewHash(data)
+	checksum := crypto.Sha256Hash(data)
 	data = append(a.PublicSpendKey[:], a.PublicViewKey[:]...)
 	data = append(data, checksum[:4]...)
-	return MainNetworkId + base58.Encode(data)
+	return MainAddressPrefix + base58.Encode(data)
 }
 
 func (a Address) Hash() crypto.Hash {
-	return crypto.NewHash(append(a.PublicSpendKey[:], a.PublicViewKey[:]...))
+	return crypto.Sha256Hash(append(a.PublicSpendKey[:], a.PublicViewKey[:]...))
 }
 
 func (a Address) MarshalJSON() ([]byte, error) {

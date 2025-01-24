@@ -1,37 +1,34 @@
 package crypto
 
 import (
-	"crypto/rand"
 	"testing"
 
 	"filippo.io/edwards25519"
-	"github.com/stretchr/testify/assert"
-	"go.dedis.ch/kyber/v3/suites"
+	"github.com/stretchr/testify/require"
 )
 
 func TestEdwards(t *testing.T) {
-	assert := assert.New(t)
+	require := require.New(t)
 
 	seed := make([]byte, 64)
-	rand.Read(seed)
+	ReadRand(seed)
 	key := NewKeyFromSeed(seed)
 	a, err := edwards25519.NewScalar().SetCanonicalBytes(key[:])
-	assert.Nil(err)
+	require.Nil(err)
 	seed = make([]byte, 64)
-	rand.Read(seed)
+	ReadRand(seed)
 	key = NewKeyFromSeed(seed)
 	b, err := edwards25519.NewScalar().SetCanonicalBytes(key[:])
-	assert.Nil(err)
+	require.Nil(err)
 
 	p1 := edwards25519.NewIdentityPoint().ScalarBaseMult(a)
 	p2 := edwards25519.NewIdentityPoint().ScalarMult(a, edwards25519.NewGeneratorPoint())
-	assert.Equal(p1.Bytes(), p2.Bytes())
+	require.Equal(p1.Bytes(), p2.Bytes())
 
-	s := suites.MustFind("ed25519")
-	sa := s.Scalar().SetBytes(a.Bytes())
-	sb := s.Scalar().SetBytes(b.Bytes())
-	ss := s.Scalar().Add(sa, sb)
-	tmp1 := edwards25519.NewScalar().Add(a, b)
-	st := s.Scalar().SetBytes(tmp1.Bytes())
-	assert.Equal(ss, st)
+	p2 = edwards25519.NewIdentityPoint().ScalarBaseMult(b)
+	s := edwards25519.NewScalar().Add(a, b)
+	copy(key[:], s.Bytes())
+	S := key.Public()
+	P := edwards25519.NewIdentityPoint().Add(p1, p2)
+	require.Equal(S[:], P.Bytes())
 }

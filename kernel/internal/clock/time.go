@@ -7,21 +7,16 @@ import (
 	"time"
 
 	"github.com/MixinNetwork/mixin/config"
+	"github.com/MixinNetwork/mixin/logger"
 )
 
 // FIXME GLOBAL VARIABLES
 
 var (
-	inTest   bool
-	mutex    *sync.RWMutex
-	mockDiff time.Duration
+	inTest   = strings.Contains(config.BuildVersion, "BUILD_VERSION")
+	mutex    = new(sync.RWMutex)
+	mockDiff = time.Duration(0)
 )
-
-func init() {
-	inTest = strings.Contains(config.BuildVersion, "BUILD_VERSION")
-	mutex = new(sync.RWMutex)
-	mockDiff = 0
-}
 
 func Reset() {
 	if !inTest {
@@ -41,6 +36,7 @@ func MockDiff(at time.Duration) {
 	mutex.Lock()
 	defer mutex.Unlock()
 	mockDiff += at
+	logger.Printf("clock.MockDiff(%s) => %s\n", at, time.Now().Add(mockDiff))
 }
 
 func Now() time.Time {
@@ -51,4 +47,8 @@ func Now() time.Time {
 	mutex.RLock()
 	defer mutex.RUnlock()
 	return time.Now().Add(mockDiff)
+}
+
+func NowUnixNano() uint64 {
+	return uint64(Now().UnixNano())
 }

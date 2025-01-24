@@ -34,7 +34,7 @@ func (dec *Decoder) DecodeSnapshotWithTopo() (*SnapshotWithTopologicalOrder, err
 	if err != nil {
 		return nil, err
 	}
-	version := checkTxVersion(b)
+	version := checkSnapVersion(b)
 	if version < SnapshotVersionCommonEncoding {
 		return nil, fmt.Errorf("invalid version %v", b)
 	}
@@ -106,7 +106,7 @@ func (dec *Decoder) DecodeTransaction() (*SignedTransaction, error) {
 		return nil, err
 	}
 	version := checkTxVersion(b)
-	if version < TxVersionCommonEncoding {
+	if version < TxVersionHashSignature {
 		return nil, fmt.Errorf("invalid version %v", b)
 	}
 
@@ -142,37 +142,30 @@ func (dec *Decoder) DecodeTransaction() (*SignedTransaction, error) {
 		tx.Outputs = append(tx.Outputs, o)
 	}
 
-	if tx.Version >= TxVersionReferences {
-		rl, err := dec.ReadInt()
+	rl, err := dec.ReadInt()
+	if err != nil {
+		return nil, err
+	}
+	for ; rl > 0; rl -= 1 {
+		var r crypto.Hash
+		err := dec.Read(r[:])
 		if err != nil {
 			return nil, err
 		}
-		for ; rl > 0; rl -= 1 {
-			var r crypto.Hash
-			err := dec.Read(r[:])
-			if err != nil {
-				return nil, err
-			}
-			tx.References = append(tx.References, r)
-		}
-		el, err := dec.ReadUint32()
+		tx.References = append(tx.References, r)
+	}
+
+	el, err := dec.ReadUint32()
+	if err != nil {
+		return nil, err
+	}
+	if el > 0 {
+		b := make([]byte, el)
+		err = dec.Read(b)
 		if err != nil {
 			return nil, err
 		}
-		if el > 0 {
-			b := make([]byte, el)
-			err = dec.Read(b)
-			if err != nil {
-				return nil, err
-			}
-			tx.Extra = b
-		}
-	} else {
-		eb, err := dec.ReadBytes()
-		if err != nil {
-			return nil, err
-		}
-		tx.Extra = eb
+		tx.Extra = b
 	}
 
 	sl, err := dec.ReadInt()
@@ -218,11 +211,11 @@ func (dec *Decoder) ReadInput() (*Input, error) {
 		return nil, err
 	}
 
-	ii, err := dec.ReadInt()
+	ii, err := dec.ReadUint16()
 	if err != nil {
 		return nil, err
 	}
-	in.Index = ii
+	in.Index = uint(ii)
 
 	gb, err := dec.ReadBytes()
 	if err != nil {
@@ -250,13 +243,13 @@ func (dec *Decoder) ReadInput() (*Input, error) {
 		if err != nil {
 			return nil, err
 		}
-		d.TransactionHash = string(th)
+		d.Transaction = string(th)
 
 		oi, err := dec.ReadUint64()
 		if err != nil {
 			return nil, err
 		}
-		d.OutputIndex = oi
+		d.Index = oi
 
 		amt, err := dec.ReadInteger()
 		if err != nil {
@@ -342,17 +335,6 @@ func (dec *Decoder) ReadOutput() (*Output, error) {
 		return nil, err
 	} else if hw {
 		w := &WithdrawalData{}
-		err := dec.Read(w.Chain[:])
-		if err != nil {
-			return nil, err
-		}
-
-		ak, err := dec.ReadBytes()
-		if err != nil {
-			return nil, err
-		}
-		w.AssetKey = string(ak)
-
 		ab, err := dec.ReadBytes()
 		if err != nil {
 			return nil, err

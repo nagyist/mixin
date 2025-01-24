@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
-	"time"
 
 	"github.com/MixinNetwork/mixin/crypto"
 )
@@ -28,25 +27,43 @@ func (n *Node) IdForNetwork(networkId crypto.Hash) crypto.Hash {
 	return n.Signer.Hash().ForNetwork(networkId)
 }
 
-func (tx *Transaction) validateNodePledge(store DataStore, inputs map[string]*UTXO) error {
+func (tx *Transaction) NodeTransactionExtraAsSigner() *Address {
+	switch tx.AsVersioned().TransactionType() {
+	case TransactionTypeNodePledge:
+	case TransactionTypeNodeAccept:
+	case TransactionTypeNodeRemove:
+	default:
+		panic(tx.AsVersioned().PayloadHash())
+	}
+
+	var signer Address
+	copy(signer.PublicSpendKey[:], tx.Extra)
+	signer.PrivateViewKey = signer.PublicSpendKey.DeterministicHashDerive()
+	signer.PublicViewKey = signer.PrivateViewKey.Public()
+	return &signer
+}
+
+func (tx *Transaction) validateNodePledge(store DataStore, inputs map[string]*UTXO, snapTime uint64) error {
 	if tx.Asset != XINAssetId {
 		return fmt.Errorf("invalid node asset %s", tx.Asset.String())
 	}
 	if len(tx.Outputs) != 1 {
 		return fmt.Errorf("invalid outputs count %d for pledge transaction", len(tx.Outputs))
 	}
+	if len(tx.Inputs) != 1 || len(inputs) != len(tx.Inputs) {
+		return fmt.Errorf("invalid inputs count %d for pledge transaction", len(tx.Outputs))
+	}
+	fk := fmt.Sprintf("%s:%d", tx.Inputs[0].Hash.String(), tx.Inputs[0].Index)
+	if inputs[fk].Type != OutputTypeScript && inputs[fk].Type != OutputTypeNodeRemove {
+		return fmt.Errorf("invalid utxo type %d", inputs[fk].Type)
+	}
 	if len(tx.Extra) != 2*len(crypto.Key{}) {
 		return fmt.Errorf("invalid extra length %d for pledge transaction", len(tx.Extra))
-	}
-	for _, in := range inputs {
-		if in.Type != OutputTypeScript {
-			return fmt.Errorf("invalid utxo type %d", in.Type)
-		}
 	}
 
 	var signerSpend crypto.Key
 	copy(signerSpend[:], tx.Extra)
-	nodes := store.ReadAllNodes(uint64(time.Now().UnixNano()), false) // FIXME offset incorrect
+	nodes := store.ReadAllNodes(snapTime, false)
 	for _, n := range nodes {
 		if n.State != NodeStateAccepted && n.State != NodeStateCancelled && n.State != NodeStateRemoved {
 			return fmt.Errorf("invalid node pending state %s %s", n.Signer.String(), n.State)
@@ -62,7 +79,7 @@ func (tx *Transaction) validateNodePledge(store DataStore, inputs map[string]*UT
 	return nil
 }
 
-func (tx *Transaction) validateNodeCancel(store DataStore, msg []byte, sigs []map[uint16]*crypto.Signature) error {
+func (tx *Transaction) validateNodeCancel(store DataStore, payloadHash crypto.Hash, sigs []map[uint16]*crypto.Signature, snapTime uint64) error {
 	if tx.Asset != XINAssetId {
 		return fmt.Errorf("invalid node asset %s", tx.Asset.String())
 	}
@@ -91,7 +108,7 @@ func (tx *Transaction) validateNodeCancel(store DataStore, msg []byte, sigs []ma
 
 	var pledging *Node
 	filter := make(map[string]string)
-	nodes := store.ReadAllNodes(uint64(time.Now().UnixNano()), false) // FIXME offset incorrect
+	nodes := store.ReadAllNodes(snapTime, false)
 	for _, n := range nodes {
 		filter[n.Signer.String()] = n.State
 		if n.State == NodeStateAccepted || n.State == NodeStateCancelled || n.State == NodeStateRemoved {
@@ -124,13 +141,7 @@ func (tx *Transaction) validateNodeCancel(store DataStore, msg []byte, sigs []ma
 	if cancel.Amount.Cmp(po.Amount.Div(100)) != 0 {
 		return fmt.Errorf("invalid script output amount %s for cancel transaction", cancel.Amount)
 	}
-	var publicSpend crypto.Key
-	copy(publicSpend[:], lastPledge.Extra)
-	privateView := publicSpend.DeterministicHashDerive()
-	acc := Address{
-		PublicViewKey:  privateView.Public(),
-		PublicSpendKey: publicSpend,
-	}
+	acc := lastPledge.NodeTransactionExtraAsSigner()
 	if filter[acc.String()] != NodeStatePledging {
 		return fmt.Errorf("invalid pledge utxo source %s", filter[acc.String()])
 	}
@@ -156,13 +167,13 @@ func (tx *Transaction) validateNodeCancel(store DataStore, msg []byte, sigs []ma
 	if !bytes.Equal(pledgeSpend[:], targetSpend[:]) {
 		return fmt.Errorf("invalid pledge and cancel target %s %s", pledgeSpend, targetSpend)
 	}
-	if !pi.Keys[0].Verify(msg, *sigs[0][0]) {
+	if !pi.Keys[0].Verify(payloadHash, *sigs[0][0]) {
 		return fmt.Errorf("invalid cancel signature %s", sigs[0][0])
 	}
 	return nil
 }
 
-func (tx *Transaction) validateNodeAccept(store DataStore) error {
+func (tx *Transaction) validateNodeAccept(store DataStore, snapTime uint64) error {
 	if tx.Asset != XINAssetId {
 		return fmt.Errorf("invalid node asset %s", tx.Asset.String())
 	}
@@ -174,7 +185,7 @@ func (tx *Transaction) validateNodeAccept(store DataStore) error {
 	}
 	var pledging *Node
 	filter := make(map[string]string)
-	nodes := store.ReadAllNodes(uint64(time.Now().UnixNano()), false) // FIXME offset incorrect
+	nodes := store.ReadAllNodes(snapTime, false)
 	for _, n := range nodes {
 		filter[n.Signer.String()] = n.State
 		if n.State == NodeStateAccepted || n.State == NodeStateCancelled || n.State == NodeStateRemoved {
@@ -204,18 +215,12 @@ func (tx *Transaction) validateNodeAccept(store DataStore) error {
 	if po.Type != OutputTypeNodePledge {
 		return fmt.Errorf("invalid pledge utxo type %d", po.Type)
 	}
-	var publicSpend crypto.Key
-	copy(publicSpend[:], lastPledge.Extra)
-	privateView := publicSpend.DeterministicHashDerive()
-	acc := Address{
-		PublicViewKey:  privateView.Public(),
-		PublicSpendKey: publicSpend,
-	}
+	acc := lastPledge.NodeTransactionExtraAsSigner()
 	if filter[acc.String()] != NodeStatePledging {
 		return fmt.Errorf("invalid pledge utxo source %s", filter[acc.String()])
 	}
 	if !bytes.Equal(lastPledge.Extra, tx.Extra) {
-		return fmt.Errorf("invalid pledge and accpet key %s %s", hex.EncodeToString(lastPledge.Extra), hex.EncodeToString(tx.Extra))
+		return fmt.Errorf("invalid pledge and accept key %s %s", hex.EncodeToString(lastPledge.Extra), hex.EncodeToString(tx.Extra))
 	}
 	return nil
 }

@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/MixinNetwork/mixin/common"
-	"github.com/dgraph-io/badger/v3"
+	"github.com/dgraph-io/badger/v4"
 )
 
 func (s *BadgerStore) LoadGenesis(rounds []*common.Round, snapshots []*common.SnapshotWithTopologicalOrder, transactions []*common.VersionedTransaction) error {
@@ -13,6 +13,11 @@ func (s *BadgerStore) LoadGenesis(rounds []*common.Round, snapshots []*common.Sn
 
 	loaded, err := checkGenesisLoad(txn, snapshots)
 	if loaded || err != nil {
+		return err
+	}
+
+	err = writeAssetInfo(txn, common.XINAssetId, common.XINAsset)
+	if err != nil {
 		return err
 	}
 
@@ -35,6 +40,16 @@ func (s *BadgerStore) LoadGenesis(rounds []*common.Round, snapshots []*common.Sn
 		if err != nil {
 			return err
 		}
+	}
+
+	cs := snapshots[len(snapshots)-1]
+	ct := transactions[len(snapshots)-1]
+	if cs.TopologicalOrder+1 != uint64(len(snapshots)) {
+		panic(cs.TopologicalOrder)
+	}
+	err = writeConsensusSnapshot(txn, cs.Snapshot, ct, nil)
+	if err != nil {
+		return err
 	}
 
 	return txn.Commit()
@@ -69,7 +84,7 @@ func checkGenesisLoad(txn *badger.Txn, snapshots []*common.SnapshotWithTopologic
 		if err != nil {
 			return loaded, err
 		}
-		snap, err := common.DecompressUnmarshalVersionedSnapshot(v)
+		snap, err := common.UnmarshalVersionedSnapshot(v)
 		if err != nil {
 			return loaded, err
 		}

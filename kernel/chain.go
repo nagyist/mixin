@@ -55,8 +55,9 @@ type Chain struct {
 	CosiRandoms        map[crypto.Key]*crypto.Key
 	UsedRandoms        map[crypto.Hash]*crypto.Key
 	CosiCommitments    map[crypto.Hash][]*crypto.Key
-	UsedCommitments   map[crypto.Key]bool
+	UsedCommitments    map[crypto.Key]bool
 	ComitmentsSentTime time.Time
+	CosiCommunicatedAt map[crypto.Hash]time.Time
 
 	CosiAggregators map[crypto.Hash]*CosiAggregator
 	CosiVerifiers   map[crypto.Hash]*CosiVerifier
@@ -78,22 +79,23 @@ func (node *Node) buildChain(chainId crypto.Hash) *Chain {
 	logger.Printf("node.buildChain(%s)", chainId)
 
 	chain := &Chain{
-		node:             node,
-		ChainId:          chainId,
-		CosiRandoms:      make(map[crypto.Key]*crypto.Key),
-		UsedRandoms:      make(map[crypto.Hash]*crypto.Key),
-		CosiCommitments:  make(map[crypto.Hash][]*crypto.Key),
-		UsedCommitments: make(map[crypto.Key]bool),
-		CosiAggregators:  make(map[crypto.Hash]*CosiAggregator),
-		CosiVerifiers:    make(map[crypto.Hash]*CosiVerifier),
-		CachePool:        make(chan *CosiAction, CachePoolSnapshotsLimit),
-		persistStore:     node.persistStore,
-		finalActionsRing: make(chan *CosiAction, FinalPoolSlotsLimit),
-		plc:              make(chan struct{}),
-		clc:              make(chan struct{}),
-		wlc:              make(chan struct{}),
-		slc:              make(chan struct{}),
-		running:          false,
+		node:               node,
+		ChainId:            chainId,
+		CosiRandoms:        make(map[crypto.Key]*crypto.Key),
+		UsedRandoms:        make(map[crypto.Hash]*crypto.Key),
+		CosiCommitments:    make(map[crypto.Hash][]*crypto.Key),
+		UsedCommitments:    make(map[crypto.Key]bool),
+		CosiCommunicatedAt: make(map[crypto.Hash]time.Time),
+		CosiAggregators:    make(map[crypto.Hash]*CosiAggregator),
+		CosiVerifiers:      make(map[crypto.Hash]*CosiVerifier),
+		CachePool:          make(chan *CosiAction, CachePoolSnapshotsLimit),
+		persistStore:       node.persistStore,
+		finalActionsRing:   make(chan *CosiAction, FinalPoolSlotsLimit),
+		plc:                make(chan struct{}),
+		clc:                make(chan struct{}),
+		wlc:                make(chan struct{}),
+		slc:                make(chan struct{}),
+		running:            false,
 	}
 
 	err := chain.loadState()
@@ -161,7 +163,7 @@ func (ab ActionBuffer) Poll() *CosiAction {
 }
 
 func (chain *Chain) loadIdentity() *CNode {
-	now := uint64(clock.Now().UnixNano())
+	now := clock.NowUnixNano()
 	for _, n := range chain.node.NodesListWithoutState(now, false) {
 		if chain.ChainId == n.IdForNetwork {
 			return n
@@ -217,7 +219,7 @@ func (chain *Chain) loadState() error {
 	state.RoundHistory = loadRoundHistoryForNode(chain.persistStore, final)
 	cache.Timestamp = final.Start + config.SnapshotRoundGap
 
-	allNodes := chain.node.NodesListWithoutState(uint64(clock.Now().UnixNano()), false)
+	allNodes := chain.node.NodesListWithoutState(clock.NowUnixNano(), false)
 	for _, cn := range allNodes {
 		if chain.ChainId == cn.IdForNetwork {
 			continue
@@ -247,16 +249,19 @@ func (chain *Chain) QueuePollSnapshots() {
 				continue
 			}
 			if cs := chain.State; cs != nil && (round.Number < cs.CacheRound.Number || round.Number > cs.CacheRound.Number+1) {
-				logger.Debugf("QueuePollSnapshots final round number bad %s %d %d %d\n", chain.ChainId, chain.FinalIndex, cs.CacheRound.Number, round.Number)
+				logger.Debugf("QueuePollSnapshots final round number bad %s %d %d %d\n",
+					chain.ChainId, chain.FinalIndex, cs.CacheRound.Number, round.Number)
 				continue
 			}
 			if round.Timestamp > chain.node.GraphTimestamp+uint64(config.KernelNodeAcceptPeriodMaximum) {
 				stale = true
 			}
-			logger.Debugf("QueuePollSnapshots final round good %s %d %d %d\n", chain.ChainId, chain.FinalIndex, round.Number, round.Size)
+			logger.Debugf("QueuePollSnapshots final round good %s %d %d %d\n",
+				chain.ChainId, chain.FinalIndex, round.Number, round.Size)
 			for j := 0; j < round.Size; j++ {
 				ps := round.Snapshots[j]
-				logger.Debugf("QueuePollSnapshots final snapshot %s %d %s %t %d\n", chain.ChainId, chain.FinalIndex, ps.Snapshot.Hash, ps.finalized, len(ps.peers))
+				logger.Debugf("QueuePollSnapshots final snapshot %s %d %s %t %d\n",
+					chain.ChainId, chain.FinalIndex, ps.Snapshot.Hash, ps.finalized, len(ps.peers))
 				if ps.finalized {
 					continue
 				}
@@ -279,30 +284,38 @@ func (chain *Chain) QueuePollSnapshots() {
 					break
 				}
 			}
-			logger.Debugf("QueuePollSnapshots final round done %s %d %d %d\n", chain.ChainId, chain.FinalIndex, round.Number, round.Size)
+			logger.Debugf("QueuePollSnapshots final round done %s %d %d %d\n",
+				chain.ChainId, chain.FinalIndex, round.Number, round.Size)
 		}
 
-		logger.Debugf("QueuePollSnapshots cache pool begin %s when final %d %d\n", chain.ChainId, chain.FinalIndex, chain.FinalCount)
+		logger.Debugf("QueuePollSnapshots cache pool begin %s when final %d %d\n",
+			chain.ChainId, chain.FinalIndex, chain.FinalCount)
 		for {
-			logger.Debugf("QueuePollSnapshots cache pool step %s from %d when final %d %d\n", chain.ChainId, cache, chain.FinalIndex, chain.FinalCount)
+			logger.Debugf("QueuePollSnapshots cache pool step %s from %d when final %d %d\n",
+				chain.ChainId, cache, chain.FinalIndex, chain.FinalCount)
 			m := chain.CachePool.Poll()
 			if m == nil {
-				logger.Verbosef("QueuePollSnapshots(%s) break at %d when final %d %d\n", chain.ChainId, cache, chain.FinalIndex, chain.FinalCount)
+				logger.Verbosef("QueuePollSnapshots(%s) break at %d when final %d %d\n",
+					chain.ChainId, cache, chain.FinalIndex, chain.FinalCount)
 				break
 			}
-			logger.Debugf("QueuePollSnapshots cache pool step %s got %v when final %d %d\n", chain.ChainId, m, chain.FinalIndex, chain.FinalCount)
+			logger.Debugf("QueuePollSnapshots cache pool step %s got %v when final %d %d\n",
+				chain.ChainId, m, chain.FinalIndex, chain.FinalCount)
 			_, err := chain.cosiHook(m)
 			if err != nil {
 				panic(err)
 			}
 			cache++
-			logger.Debugf("QueuePollSnapshots cache pool step %s to %d when final %d %d\n", chain.ChainId, cache, chain.FinalIndex, chain.FinalCount)
+			logger.Debugf("QueuePollSnapshots cache pool step %s to %d when final %d %d\n",
+				chain.ChainId, cache, chain.FinalIndex, chain.FinalCount)
 			if cache > 256 {
-				logger.Verbosef("QueuePollSnapshots(%s) break at %d when final %d %d\n", chain.ChainId, cache, chain.FinalIndex, chain.FinalCount)
+				logger.Verbosef("QueuePollSnapshots(%s) break at %d when final %d %d\n",
+					chain.ChainId, cache, chain.FinalIndex, chain.FinalCount)
 				break
 			}
 		}
-		logger.Debugf("QueuePollSnapshots cache pool end %s when final %d %d\n", chain.ChainId, chain.FinalIndex, chain.FinalCount)
+		logger.Debugf("QueuePollSnapshots cache pool end %s when final %d %d\n",
+			chain.ChainId, chain.FinalIndex, chain.FinalCount)
 
 		if stale || final == 0 && cache == 0 {
 			time.Sleep(300 * time.Millisecond)
@@ -361,7 +374,8 @@ func (chain *Chain) appendFinalSnapshot(peerId crypto.Hash, s *common.Snapshot) 
 	}
 	offset := int(s.RoundNumber - start)
 	if offset >= FinalPoolSlotsLimit {
-		logger.Verbosef("appendFinalSnapshot(%s, %s) pool slots full %d %d %d %d\n", peerId, s.Hash, start, s.RoundNumber, chain.FinalIndex, fi)
+		logger.Verbosef("appendFinalSnapshot(%s, %s) pool slots full %d %d %d %d\n",
+			peerId, s.Hash, start, s.RoundNumber, chain.FinalIndex, fi)
 		return false, nil
 	}
 	offset = (offset + fi) % FinalPoolSlotsLimit
@@ -380,7 +394,8 @@ func (chain *Chain) appendFinalSnapshot(peerId crypto.Hash, s *common.Snapshot) 
 		round.Size = 0
 	}
 	if round.Size == FinalPoolRoundSizeLimit {
-		return false, fmt.Errorf("appendFinalSnapshot(%s, %s) round snapshots full %s:%d", peerId, s.Hash, s.NodeId, s.RoundNumber)
+		return false, fmt.Errorf("appendFinalSnapshot(%s, %s) round snapshots full %s:%d",
+			peerId, s.Hash, s.NodeId, s.RoundNumber)
 	}
 	index, found := round.index[s.Hash]
 	if !found {
@@ -413,7 +428,8 @@ func (chain *Chain) AppendFinalSnapshot(peerId crypto.Hash, s *common.Snapshot) 
 	ps := &CosiAction{PeerId: peerId, Snapshot: s}
 	err := chain.finalActionsRing.Offer(ps)
 	if err != nil {
-		return fmt.Errorf("AppendFinalSnapshot(%s, %s) final actions ring full %d %d", peerId, s.Hash, s.RoundNumber, chain.FinalIndex)
+		return fmt.Errorf("AppendFinalSnapshot(%s, %s) final actions ring full %d %d",
+			peerId, s.Hash, s.RoundNumber, chain.FinalIndex)
 	}
 	return nil
 }

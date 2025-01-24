@@ -1,7 +1,6 @@
 package common
 
 import (
-	"crypto/rand"
 	"crypto/sha512"
 	"encoding/binary"
 	"fmt"
@@ -11,66 +10,58 @@ import (
 )
 
 const (
-	TxVersionReferences     = 0x04
-	TxVersionBlake3Hash     = 0x03
-	TxVersionCommonEncoding = 0x02
+	TxVersionHashSignature = 0x05
 
 	ExtraSizeGeneralLimit    = 256
 	ExtraSizeStorageStep     = 1024
 	ExtraSizeStorageCapacity = 1024 * 1024 * 4
-	ExtraStoragePriceStep    = "0.001"
+	ExtraStoragePriceStep    = "0.0001"
 	SliceCountLimit          = 256
 	ReferencesCountLimit     = 2
 
-	OutputTypeScript              = 0x00
-	OutputTypeWithdrawalSubmit    = 0xa1
-	OutputTypeWithdrawalFuel      = 0xa2
-	OutputTypeNodePledge          = 0xa3
-	OutputTypeNodeAccept          = 0xa4
-	outputTypeNodeResign          = 0xa5
-	OutputTypeNodeRemove          = 0xa6
-	OutputTypeDomainAccept        = 0xa7
-	OutputTypeDomainRemove        = 0xa8
-	OutputTypeWithdrawalClaim     = 0xa9
-	OutputTypeNodeCancel          = 0xaa
-	OutputTypeCustodianEvolution  = 0xb1
-	OutputTypeCustodianMigration  = 0xb2
-	OutputTypeCustodianDeposit    = 0xb3
-	OutputTypeCustodianWithdrawal = 0xb4
+	OutputTypeScript               = 0x00
+	OutputTypeWithdrawalSubmit     = 0xa1
+	OutputTypeNodePledge           = 0xa3
+	OutputTypeNodeAccept           = 0xa4
+	outputTypeNodeResign           = 0xa5
+	OutputTypeNodeRemove           = 0xa6
+	OutputTypeWithdrawalClaim      = 0xa9
+	OutputTypeNodeCancel           = 0xaa
+	OutputTypeCustodianUpdateNodes = 0xb1
+	OutputTypeCustodianSlashNodes  = 0xb2
 
-	TransactionTypeScript           = 0x00
-	TransactionTypeMint             = 0x01
-	TransactionTypeDeposit          = 0x02
-	TransactionTypeWithdrawalSubmit = 0x03
-	TransactionTypeWithdrawalFuel   = 0x04
-	TransactionTypeWithdrawalClaim  = 0x05
-	TransactionTypeNodePledge       = 0x06
-	TransactionTypeNodeAccept       = 0x07
-	transactionTypeNodeResign       = 0x08
-	TransactionTypeNodeRemove       = 0x09
-	TransactionTypeDomainAccept     = 0x10
-	TransactionTypeDomainRemove     = 0x11
-	TransactionTypeNodeCancel       = 0x12
-	TransactionTypeUnknown          = 0xff
+	TransactionTypeScript               = 0x00
+	TransactionTypeMint                 = 0x01
+	TransactionTypeDeposit              = 0x02
+	TransactionTypeWithdrawalSubmit     = 0x03
+	TransactionTypeWithdrawalClaim      = 0x05
+	TransactionTypeNodePledge           = 0x06
+	TransactionTypeNodeAccept           = 0x07
+	transactionTypeNodeResign           = 0x08
+	TransactionTypeNodeRemove           = 0x09
+	TransactionTypeNodeCancel           = 0x12
+	TransactionTypeCustodianUpdateNodes = 0x13
+	TransactionTypeCustodianSlashNodes  = 0x14
+	TransactionTypeUnknown              = 0xff
 )
 
 type Input struct {
 	Hash    crypto.Hash
-	Index   int
+	Index   uint
 	Genesis []byte
 	Deposit *DepositData
 	Mint    *MintData
 }
 
 type Output struct {
-	Type       uint8
-	Amount     Integer
-	Keys       []*crypto.Key
-	Withdrawal *WithdrawalData `msgpack:",omitempty"`
+	Type   uint8
+	Amount Integer
 
-	// OutputTypeScript fields
-	Script Script
+	Keys   []*crypto.Key
 	Mask   crypto.Key
+	Script Script
+
+	Withdrawal *WithdrawalData
 }
 
 type Transaction struct {
@@ -78,15 +69,14 @@ type Transaction struct {
 	Asset      crypto.Hash
 	Inputs     []*Input
 	Outputs    []*Output
-	References []crypto.Hash `msgpack:"-"`
+	References []crypto.Hash
 	Extra      []byte
 }
 
 type SignedTransaction struct {
 	Transaction
-	AggregatedSignature *AggregatedSignature           `msgpack:"-"`
-	SignaturesMap       []map[uint16]*crypto.Signature `msgpack:"-"`
-	SignaturesSliceV1   [][]*crypto.Signature          `msgpack:"-"`
+	AggregatedSignature *AggregatedSignature
+	SignaturesMap       []map[uint16]*crypto.Signature
 }
 
 func (tx *Transaction) ViewGhostKey(a *crypto.Key) []*Output {
@@ -131,8 +121,6 @@ func (tx *SignedTransaction) TransactionType() uint8 {
 		switch out.Type {
 		case OutputTypeWithdrawalSubmit:
 			return TransactionTypeWithdrawalSubmit
-		case OutputTypeWithdrawalFuel:
-			return TransactionTypeWithdrawalFuel
 		case OutputTypeWithdrawalClaim:
 			return TransactionTypeWithdrawalClaim
 		case OutputTypeNodePledge:
@@ -143,10 +131,10 @@ func (tx *SignedTransaction) TransactionType() uint8 {
 			return TransactionTypeNodeAccept
 		case OutputTypeNodeRemove:
 			return TransactionTypeNodeRemove
-		case OutputTypeDomainAccept:
-			return TransactionTypeDomainAccept
-		case OutputTypeDomainRemove:
-			return TransactionTypeDomainRemove
+		case OutputTypeCustodianUpdateNodes:
+			return TransactionTypeCustodianUpdateNodes
+		case OutputTypeCustodianSlashNodes:
+			return TransactionTypeCustodianSlashNodes
 		}
 		isScript = isScript && out.Type == OutputTypeScript
 	}
@@ -158,7 +146,7 @@ func (tx *SignedTransaction) TransactionType() uint8 {
 }
 
 func (signed *SignedTransaction) SignUTXO(utxo *UTXO, accounts []*Address) error {
-	msg := signed.AsVersioned().PayloadMarshal()
+	msg := signed.AsVersioned().PayloadHash()
 
 	if len(accounts) == 0 {
 		return nil
@@ -184,8 +172,6 @@ func (signed *SignedTransaction) SignUTXO(utxo *UTXO, accounts []*Address) error
 }
 
 func (signed *SignedTransaction) SignInput(reader UTXOKeysReader, index int, accounts []*Address) error {
-	msg := signed.AsVersioned().PayloadMarshal()
-
 	if len(accounts) == 0 {
 		return nil
 	}
@@ -211,6 +197,7 @@ func (signed *SignedTransaction) SignInput(reader UTXOKeysReader, index int, acc
 	}
 
 	sigs := make(map[uint16]*crypto.Signature)
+	msg := signed.AsVersioned().PayloadHash()
 	for _, acc := range accounts {
 		priv := crypto.DeriveGhostPrivateKey(&utxo.Mask, &acc.PrivateViewKey, &acc.PrivateSpendKey, uint64(in.Index))
 		i, found := keysFilter[priv.Public().String()]
@@ -225,7 +212,7 @@ func (signed *SignedTransaction) SignInput(reader UTXOKeysReader, index int, acc
 }
 
 func (signed *SignedTransaction) SignRaw(key crypto.Key) error {
-	msg := signed.AsVersioned().PayloadMarshal()
+	msg := signed.AsVersioned().PayloadHash()
 
 	if len(signed.Inputs) != 1 {
 		return fmt.Errorf("invalid inputs count %d", len(signed.Inputs))
@@ -233,12 +220,6 @@ func (signed *SignedTransaction) SignRaw(key crypto.Key) error {
 	in := signed.Inputs[0]
 	if in.Deposit == nil && in.Mint == nil {
 		return fmt.Errorf("invalid input format")
-	}
-	if in.Deposit != nil {
-		err := signed.verifyDepositFormat()
-		if err != nil {
-			return err
-		}
 	}
 	sig := key.Sign(msg)
 	sigs := map[uint16]*crypto.Signature{0: &sig}
@@ -284,7 +265,7 @@ func (signed *SignedTransaction) AggregateSign(reader UTXOKeysReader, accounts [
 	A := edwards25519.NewIdentityPoint()
 	for _, m := range signers {
 		buf := binary.BigEndian.AppendUint16(seed, uint16(m))
-		s := crypto.NewHash(buf)
+		s := crypto.Blake3Hash(buf)
 		r := crypto.NewKeyFromSeed(append(s[:], s[:]...))
 		randoms = append(randoms, &r)
 		R := r.Public()
@@ -304,11 +285,11 @@ func (signed *SignedTransaction) AggregateSign(reader UTXOKeysReader, accounts [
 	}
 
 	var hramDigest [64]byte
-	msg := signed.AsVersioned().PayloadMarshal()
+	msg := signed.AsVersioned().PayloadHash()
 	h := sha512.New()
 	h.Write(P.Bytes())
 	h.Write(A.Bytes())
-	h.Write(msg)
+	h.Write(msg[:])
 	h.Sum(hramDigest[:0])
 	x, err := edwards25519.NewScalar().SetUniformBytes(hramDigest[:])
 	if err != nil {
@@ -336,28 +317,14 @@ func (signed *SignedTransaction) AggregateSign(reader UTXOKeysReader, accounts [
 	return nil
 }
 
-func NewTransactionV4(asset crypto.Hash) *Transaction {
+func NewTransactionV5(asset crypto.Hash) *Transaction {
 	return &Transaction{
-		Version: TxVersionReferences,
+		Version: TxVersionHashSignature,
 		Asset:   asset,
 	}
 }
 
-func NewTransactionV3(asset crypto.Hash) *Transaction {
-	return &Transaction{
-		Version: TxVersionBlake3Hash,
-		Asset:   asset,
-	}
-}
-
-func NewTransactionV2(asset crypto.Hash) *Transaction {
-	return &Transaction{
-		Version: TxVersionCommonEncoding,
-		Asset:   asset,
-	}
-}
-
-func (tx *Transaction) AddInput(hash crypto.Hash, index int) {
+func (tx *Transaction) AddInput(hash crypto.Hash, index uint) {
 	in := &Input{
 		Hash:  hash,
 		Index: index,
@@ -389,12 +356,8 @@ func (tx *Transaction) AddScriptOutput(accounts []*Address, s Script, amount Int
 	tx.AddOutputWithType(OutputTypeScript, accounts, s, amount, seed)
 }
 
-func (tx *Transaction) AddRandomScriptOutput(accounts []*Address, s Script, amount Integer) error {
+func (tx *Transaction) AddRandomScriptOutput(accounts []*Address, s Script, amount Integer) {
 	seed := make([]byte, 64)
-	_, err := rand.Read(seed)
-	if err != nil {
-		return err
-	}
+	crypto.ReadRand(seed)
 	tx.AddScriptOutput(accounts, s, amount, seed)
-	return nil
 }

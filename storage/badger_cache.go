@@ -6,15 +6,13 @@ import (
 
 	"github.com/MixinNetwork/mixin/common"
 	"github.com/MixinNetwork/mixin/crypto"
-	"github.com/dgraph-io/badger/v3"
+	"github.com/dgraph-io/badger/v4"
 )
 
 const (
-	cachePrefixTransactionQueue  = "CACHETRANSACTIONQUEUE"
-	cachePrefixTransactionOrder  = "CACHETRANSACTIONORDER"
-	cachePrefixTransactionCache  = "CACHETRANSACTIONPAYLOAD"
-	cachePrefixSnapshotNodeQueue = "SNAPSHOTNODEQUEUE"
-	cachePrefixSnapshotNodeMeta  = "SNAPSHOTNODEMETA"
+	cachePrefixTransactionQueue = "CACHETRANSACTIONQUEUE"
+	cachePrefixTransactionOrder = "CACHETRANSACTIONORDER"
+	cachePrefixTransactionCache = "CACHETRANSACTIONPAYLOAD"
 )
 
 func (s *BadgerStore) CacheRetrieveTransactions(limit int) ([]*common.VersionedTransaction, error) {
@@ -106,7 +104,7 @@ func (s *BadgerStore) CachePutTransaction(tx *common.VersionedTransaction) error
 	}
 
 	key = cacheTransactionCacheKey(hash)
-	val := tx.CompressMarshal()
+	val := tx.Marshal()
 	etr = badger.NewEntry(key, val).WithTTL(time.Duration(s.custom.Node.CacheTTL+60) * time.Second)
 	err = txn.SetEntry(etr)
 	if err != nil {
@@ -142,7 +140,7 @@ func (s *BadgerStore) cacheReadTransaction(txn *badger.Txn, tx crypto.Hash) (*co
 	if err != nil {
 		return nil, err
 	}
-	return common.DecompressUnmarshalVersionedTransaction(val)
+	return common.UnmarshalVersionedTransaction(val)
 }
 
 func cacheTransactionCacheKey(hash crypto.Hash) []byte {

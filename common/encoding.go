@@ -59,9 +59,6 @@ func (enc *Encoder) encodeSnapshotPayload(s *Snapshot, withSig bool) {
 	if len(s.Transactions) != 1 { // FIXME allow more than one transactions
 		panic(s)
 	}
-	if len(s.Signatures) != 0 {
-		panic(len(s.Signatures))
-	}
 	if !withSig && s.Signature != nil {
 		panic(s.Signature)
 	}
@@ -86,10 +83,7 @@ func (enc *Encoder) encodeSnapshotPayload(s *Snapshot, withSig bool) {
 }
 
 func (enc *Encoder) EncodeTransaction(signed *SignedTransaction) []byte {
-	if signed.Version < TxVersionCommonEncoding {
-		panic(signed)
-	}
-	if len(signed.SignaturesSliceV1) > 0 {
+	if signed.Version < TxVersionHashSignature {
 		panic(signed)
 	}
 
@@ -109,24 +103,18 @@ func (enc *Encoder) EncodeTransaction(signed *SignedTransaction) []byte {
 		enc.EncodeOutput(out)
 	}
 
-	if signed.Version >= TxVersionReferences {
-		rl := len(signed.References)
-		enc.WriteInt(rl)
-		for _, r := range signed.References {
-			enc.Write(r[:])
-		}
-
-		el := len(signed.Extra)
-		if el > ExtraSizeStorageCapacity {
-			panic(el)
-		}
-		enc.WriteUint32(uint32(el))
-		enc.Write(signed.Extra)
-	} else {
-		el := len(signed.Extra)
-		enc.WriteInt(el)
-		enc.Write(signed.Extra)
+	rl := len(signed.References)
+	enc.WriteInt(rl)
+	for _, r := range signed.References {
+		enc.Write(r[:])
 	}
+
+	el := len(signed.Extra)
+	if el > ExtraSizeStorageCapacity {
+		panic(el)
+	}
+	enc.WriteUint32(uint32(el))
+	enc.Write(signed.Extra)
 
 	if signed.AggregatedSignature != nil {
 		enc.EncodeAggregatedSignature(signed.AggregatedSignature)
@@ -145,8 +133,11 @@ func (enc *Encoder) EncodeTransaction(signed *SignedTransaction) []byte {
 }
 
 func (enc *Encoder) EncodeInput(in *Input) {
+	if in.Index > 1024 {
+		panic(in.Index)
+	}
 	enc.Write(in.Hash[:])
-	enc.WriteInt(in.Index)
+	enc.WriteUint16(uint16(in.Index))
 
 	enc.WriteInt(len(in.Genesis))
 	enc.Write(in.Genesis)
@@ -160,10 +151,10 @@ func (enc *Encoder) EncodeInput(in *Input) {
 		enc.WriteInt(len(d.AssetKey))
 		enc.Write([]byte(d.AssetKey))
 
-		enc.WriteInt(len(d.TransactionHash))
-		enc.Write([]byte(d.TransactionHash))
+		enc.WriteInt(len(d.Transaction))
+		enc.Write([]byte(d.Transaction))
 
-		enc.WriteUint64(d.OutputIndex)
+		enc.WriteUint64(d.Index)
 		enc.WriteInteger(d.Amount)
 	}
 
@@ -196,10 +187,6 @@ func (enc *Encoder) EncodeOutput(o *Output) {
 		enc.Write(null)
 	} else {
 		enc.Write(magic)
-		enc.Write(w.Chain[:])
-
-		enc.WriteInt(len(w.AssetKey))
-		enc.Write([]byte(w.AssetKey))
 
 		enc.WriteInt(len(w.Address))
 		enc.Write([]byte(w.Address))
@@ -324,7 +311,7 @@ func (enc *Encoder) EncodeAggregatedSignature(js *AggregatedSignature) {
 	enc.WriteInt(AggregatedSignaturePrefix)
 	enc.Write(js.Signature[:])
 	if len(js.Signers) == 0 {
-		enc.WriteByte(AggregatedSignatureOrdinaryMask)
+		_ = enc.WriteByte(AggregatedSignatureOrdinaryMask)
 		enc.WriteInt(0)
 		return
 	}
@@ -339,7 +326,7 @@ func (enc *Encoder) EncodeAggregatedSignature(js *AggregatedSignature) {
 
 	max := js.Signers[len(js.Signers)-1]
 	if max/8+1 > len(js.Signers)*2 {
-		enc.WriteByte(AggregatedSignatureSparseMask)
+		_ = enc.WriteByte(AggregatedSignatureSparseMask)
 		enc.WriteInt(len(js.Signers))
 		for _, m := range js.Signers {
 			enc.WriteInt(m)
@@ -351,7 +338,7 @@ func (enc *Encoder) EncodeAggregatedSignature(js *AggregatedSignature) {
 	for _, m := range js.Signers {
 		masks[m/8] = masks[m/8] ^ (1 << (m % 8))
 	}
-	enc.WriteByte(AggregatedSignatureOrdinaryMask)
+	_ = enc.WriteByte(AggregatedSignatureOrdinaryMask)
 	enc.WriteInt(len(masks))
 	enc.Write(masks)
 }

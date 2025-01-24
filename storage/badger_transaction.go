@@ -9,7 +9,7 @@ import (
 	"github.com/MixinNetwork/mixin/common"
 	"github.com/MixinNetwork/mixin/config"
 	"github.com/MixinNetwork/mixin/crypto"
-	"github.com/dgraph-io/badger/v3"
+	"github.com/dgraph-io/badger/v4"
 )
 
 func (s *BadgerStore) ReadTransaction(hash crypto.Hash) (*common.VersionedTransaction, string, error) {
@@ -35,10 +35,10 @@ func readTransactionAndFinalization(txn *badger.Txn, hash crypto.Hash) (*common.
 	if err != nil {
 		return tx, "", err
 	}
-	if len(val) == 0 {
-		return tx, "MISSING", nil
-	}
 	var final crypto.Hash
+	if len(val) != len(final) {
+		panic(len(val))
+	}
 	copy(final[:], val)
 	return tx, final.String(), nil
 }
@@ -86,7 +86,7 @@ func (s *BadgerStore) WriteTransaction(ver *common.VersionedTransaction) error {
 			if err != nil {
 				panic(fmt.Errorf("UTXO check error %s", err.Error()))
 			}
-			out, err := common.DecompressUnmarshalUTXO(ival)
+			out, err := common.UnmarshalUTXO(ival)
 			if err != nil {
 				panic(fmt.Errorf("UTXO check error %s", err.Error()))
 			}
@@ -114,7 +114,7 @@ func readTransaction(txn *badger.Txn, hash crypto.Hash) (*common.VersionedTransa
 	if err != nil {
 		return nil, err
 	}
-	return common.DecompressUnmarshalVersionedTransaction(val)
+	return common.UnmarshalVersionedTransaction(val)
 }
 
 func pruneTransaction(txn *badger.Txn, hash crypto.Hash) error {
@@ -139,7 +139,14 @@ func writeTransaction(txn *badger.Txn, ver *common.VersionedTransaction) error {
 		return err
 	}
 
-	val := ver.CompressMarshal()
+	if d := ver.Inputs[0].Deposit; d != nil {
+		err := verifyAssetInfo(txn, ver.Asset, d.Asset())
+		if err != nil {
+			return err
+		}
+	}
+
+	val := ver.Marshal()
 	return txn.Set(key, val)
 }
 
@@ -157,54 +164,42 @@ func finalizeTransaction(txn *badger.Txn, ver *common.VersionedTransaction, snap
 		return err
 	}
 
-	var genesis bool
-	for _, in := range ver.Inputs {
-		if len(in.Genesis) > 0 {
-			genesis = true
-			break
-		}
-	}
-
-	for _, utxo := range ver.UnspentOutputs() {
-		err := writeUTXO(txn, utxo, ver.Extra, snap.Timestamp, genesis)
+	if d := ver.Inputs[0].Deposit; d != nil {
+		err := writeAssetInfo(txn, ver.Asset, d.Asset())
 		if err != nil {
 			return err
 		}
 	}
-	return nil
+
+	genesis := len(ver.Inputs[0].Genesis) > 0
+	for _, utxo := range ver.UnspentOutputs() {
+		err := writeUTXO(txn, utxo, ver, snap.Timestamp, genesis)
+		if err != nil {
+			return err
+		}
+	}
+
+	return writeTotalInAsset(txn, ver)
 }
 
-func writeUTXO(txn *badger.Txn, utxo *common.UTXOWithLock, extra []byte, timestamp uint64, genesis bool) error {
+func writeUTXO(txn *badger.Txn, utxo *common.UTXOWithLock, ver *common.VersionedTransaction, timestamp uint64, genesis bool) error {
 	for _, k := range utxo.Keys {
-		key := graphGhostKey(*k)
-
-		// FIXME assert kind checks, not needed at all
-		if config.Debug {
-			_, err := txn.Get(key)
-			if err == nil {
-				panic("ErrorValidateFailed")
-			} else if err != badger.ErrKeyNotFound {
-				return err
-			}
-		}
-		// assert end
-
-		err := txn.Set(key, utxo.Hash[:])
+		err := lockGhostKey(txn, k, utxo.Hash, true)
 		if err != nil {
 			return err
 		}
 	}
 	key := graphUtxoKey(utxo.Hash, utxo.Index)
-	val := utxo.CompressMarshal()
+	val := utxo.Marshal()
 	err := txn.Set(key, val)
 	if err != nil {
 		return err
 	}
 
 	var signer, payee crypto.Key
-	if len(extra) >= len(signer) {
-		copy(signer[:], extra)
-		copy(payee[:], extra[len(signer):])
+	if len(ver.Extra) >= len(signer) {
+		copy(signer[:], ver.Extra)
+		copy(payee[:], ver.Extra[len(signer):])
 	}
 	switch utxo.Type {
 	case common.OutputTypeNodePledge:
@@ -215,8 +210,10 @@ func writeUTXO(txn *badger.Txn, utxo *common.UTXOWithLock, extra []byte, timesta
 		return writeNodeAccept(txn, signer, payee, utxo.Hash, timestamp, genesis)
 	case common.OutputTypeNodeRemove:
 		return writeNodeRemove(txn, signer, payee, utxo.Hash, timestamp)
-	case common.OutputTypeDomainAccept:
-		return writeDomainAccept(txn, signer, utxo.Hash, timestamp)
+	case common.OutputTypeCustodianUpdateNodes:
+		return writeCustodianNodes(txn, timestamp, utxo, ver.Extra, genesis)
+	case common.OutputTypeWithdrawalClaim:
+		return writeWithdrawalClaim(txn, ver.References[0], ver.PayloadHash())
 	}
 
 	return nil
@@ -239,7 +236,10 @@ func graphGhostKey(k crypto.Key) []byte {
 	return append([]byte(graphPrefixGhost), k[:]...)
 }
 
-func graphUtxoKey(hash crypto.Hash, index int) []byte {
+func graphUtxoKey(hash crypto.Hash, index uint) []byte {
+	if index > 1024 {
+		panic(index)
+	}
 	buf := make([]byte, binary.MaxVarintLen64)
 	size := binary.PutVarint(buf, int64(index))
 	key := append([]byte(graphPrefixUTXO), hash[:]...)

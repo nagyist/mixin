@@ -12,13 +12,6 @@ import (
 	"github.com/MixinNetwork/mixin/logger"
 )
 
-const (
-	GraphOperationClassAtomic       = 0x00
-	GraphOperationClassNormalLedger = 0x01
-
-	MainnetNodeRemovalConsensusForkTimestamp = 1590000000000000000
-)
-
 func (chain *Chain) startNewRoundAndPersist(cache *CacheRound, references *common.RoundLink, timestamp uint64, finalized bool) (*CacheRound, *FinalRound, bool, error) {
 	dummyExternal := cache.References.External
 	final, dummy, err := chain.validateNewRound(cache, references, timestamp, finalized)
@@ -32,6 +25,7 @@ func (chain *Chain) startNewRoundAndPersist(cache *CacheRound, references *commo
 		Number:     final.Number + 1,
 		Timestamp:  timestamp,
 		References: references.Copy(),
+		index:      newRoundIndexCache(),
 	}
 	if dummy {
 		cache.References.External = dummyExternal
@@ -78,7 +72,7 @@ func (chain *Chain) validateNewRound(cache *CacheRound, references *common.Round
 	return final, false, nil
 }
 
-func (chain *Chain) updateEmptyHeadRoundAndPersist(m *CosiAction, final *FinalRound, cache *CacheRound, references *common.RoundLink, timestamp uint64, strict bool) error {
+func (chain *Chain) updateEmptyHeadRoundAndPersist(final *FinalRound, cache *CacheRound, references *common.RoundLink, timestamp uint64, strict bool) error {
 	if len(cache.Snapshots) != 0 {
 		return fmt.Errorf("malformated head round references not empty")
 	}
@@ -112,14 +106,16 @@ func (chain *Chain) updateExternal(final *FinalRound, external *common.Round, ro
 		return fmt.Errorf("external reference self %s", final.NodeId)
 	}
 	if external.Number < chain.State.RoundLinks[external.NodeId] {
-		return fmt.Errorf("external reference back link %d %d", external.Number, chain.State.RoundLinks[external.NodeId])
+		return fmt.Errorf("external reference back link %d %d",
+			external.Number, chain.State.RoundLinks[external.NodeId])
 	}
 	link, err := chain.persistStore.ReadLink(final.NodeId, external.NodeId)
 	if err != nil {
 		return err
 	}
 	if link != chain.State.RoundLinks[external.NodeId] {
-		panic(fmt.Errorf("should never be here %s=>%s %d %d", chain.ChainId, external.NodeId, link, chain.State.RoundLinks[external.NodeId]))
+		panic(fmt.Errorf("should never be here %s=>%s %d %d",
+			chain.ChainId, external.NodeId, link, chain.State.RoundLinks[external.NodeId]))
 	}
 
 	if strict {
@@ -131,7 +127,8 @@ func (chain *Chain) updateExternal(final *FinalRound, external *common.Round, ro
 		threshold := external.Timestamp + config.SnapshotSyncRoundThreshold*config.SnapshotRoundGap*64
 		best := chain.determineBestRound(roundTime)
 		if best != nil && threshold < best.Start {
-			return fmt.Errorf("external reference %v too early %v %f", *external, *best, time.Duration(best.Start-threshold).Seconds())
+			return fmt.Errorf("external reference %v too early %v %f",
+				*external, *best, time.Duration(best.Start-threshold).Seconds())
 		}
 	}
 
@@ -236,18 +233,22 @@ func (chain *Chain) determineBestRound(roundTime uint64) *FinalRound {
 
 func (chain *Chain) checkReferenceSanity(ec *Chain, external *common.Round, roundTime uint64) error {
 	if external.Timestamp > roundTime {
-		return fmt.Errorf("external reference later than snapshot time %f", time.Duration(external.Timestamp-roundTime).Seconds())
+		return fmt.Errorf("external reference later than snapshot time %f",
+			time.Duration(external.Timestamp-roundTime).Seconds())
 	}
 	if !chain.node.genesisNodesMap[external.NodeId] && external.Number < 7+config.SnapshotReferenceThreshold {
-		return fmt.Errorf("external hint round too early yet not genesis %d", external.Number)
+		return fmt.Errorf("external hint round too early yet not genesis %d",
+			external.Number)
 	}
 
 	cr, fr := ec.State.CacheRound, ec.State.FinalRound
-	if now := uint64(clock.Now().UnixNano()); fr.Start > now {
-		return fmt.Errorf("external hint round timestamp too future %d %d", fr.Start, clock.Now().UnixNano())
+	if now := clock.NowUnixNano(); fr.Start > now {
+		return fmt.Errorf("external hint round timestamp too future %d %d",
+			fr.Start, clock.Now().UnixNano())
 	}
 	if len(cr.Snapshots) == 0 && cr.Number == external.Number+1 && external.Number > 0 {
-		return fmt.Errorf("external hint round without extra final yet %d", external.Number)
+		return fmt.Errorf("external hint round without extra final yet %d",
+			external.Number)
 	}
 	return nil
 }
@@ -259,22 +260,6 @@ func historySinceRound(history []*FinalRound, link uint64) []*FinalRound {
 		}
 	}
 	return nil
-}
-
-func (node *Node) CacheVerify(snap crypto.Hash, sig crypto.Signature, pub crypto.Key) bool {
-	key := append(snap[:], sig[:]...)
-	key = append(key, pub[:]...)
-	value, found := node.cacheStore.Get(key)
-	if found {
-		return value.(byte) == byte(1)
-	}
-	valid := pub.Verify(snap[:], sig)
-	if valid {
-		node.cacheStore.Set(key, byte(1), 1)
-	} else {
-		node.cacheStore.Set(key, byte(0), 1)
-	}
-	return valid
 }
 
 // Nodes list change problem:
@@ -291,18 +276,7 @@ func (node *Node) CacheVerify(snap crypto.Hash, sig crypto.Signature, pub crypto
 // 3. Node A pledge snapshot finalized but not broadcasted on time.
 // Solution: Evil and slash.
 
-func (node *Node) CacheVerifyCosi(snap crypto.Hash, sig *crypto.CosiSignature, cids []crypto.Hash, publics []*crypto.Key, threshold int) ([]crypto.Hash, bool) {
-	if snap.String() == "b3ea56de6124ad2f3ad1d48f2aff8338b761e62bcde6f2f0acba63a32dd8eecc" &&
-		sig.String() == "dbb0347be24ecb8de3d66631d347fde724ff92e22e1f45deeb8b5d843fd62da39ca8e39de9f35f1e0f7336d4686917983470c098edc91f456d577fb18069620f000000003fdfe712" {
-		// FIXME this is a hack to fix the large round gap around node remove snapshot
-		// and a bug in too recent external reference, e.g. bare final round
-		signers := make([]crypto.Hash, len(sig.Keys()))
-		for i, k := range sig.Keys() {
-			signers[i] = cids[k]
-		}
-		return signers, true
-	}
-
+func (node *Node) cacheVerifyCosi(snap crypto.Hash, sig *crypto.CosiSignature, cids []crypto.Hash, publics []*crypto.Key, threshold int) ([]crypto.Hash, bool) {
 	key := sig.Signature[:]
 	key = append(snap[:], key...)
 	for _, pub := range publics {
@@ -316,9 +290,9 @@ func (node *Node) CacheVerifyCosi(snap crypto.Hash, sig *crypto.CosiSignature, c
 		return signers, len(signers) == len(sig.Keys())
 	}
 
-	err := sig.FullVerify(publics, threshold, snap[:])
+	err := sig.FullVerify(publics, threshold, snap)
 	if err != nil {
-		logger.Verbosef("CacheVerifyCosi(%s, %d, %d) ERROR %s\n", snap, len(publics), threshold, err.Error())
+		logger.Verbosef("cacheVerifyCosi(%s, %d, %d) ERROR %s\n", snap, len(publics), threshold, err.Error())
 		node.cacheStore.Set(key, []byte{0}, 1)
 		return nil, false
 	}
@@ -372,9 +346,7 @@ func (chain *Chain) ConsensusKeys(round, timestamp uint64) ([]crypto.Hash, []*cr
 
 func (chain *Chain) verifyFinalization(s *common.Snapshot) ([]crypto.Hash, bool) {
 	switch s.Version {
-	case 0:
-		return nil, chain.legacyVerifyFinalization(s.Timestamp, s.Signatures)
-	case common.SnapshotVersionMsgpackEncoding, common.SnapshotVersionCommonEncoding:
+	case common.SnapshotVersionCommonEncoding:
 	default:
 		return nil, false
 	}
@@ -383,33 +355,105 @@ func (chain *Chain) verifyFinalization(s *common.Snapshot) ([]crypto.Hash, bool)
 		return nil, false
 	}
 
-	cids, publics := chain.ConsensusKeys(s.RoundNumber, s.Timestamp)
-	base := chain.node.ConsensusThreshold(s.Timestamp, true)
-	signers, finalized := chain.node.CacheVerifyCosi(s.Hash, s.Signature, cids, publics, base)
+	timestamp := s.Timestamp
+	if s.Hash.String() == mainnetNodeRemovalHackSnapshotHash {
+		timestamp = timestamp - uint64(time.Minute)
+	}
+	if timestamp < chain.node.Epoch {
+		panic(timestamp)
+	}
+
+	cids, publics := chain.ConsensusKeys(s.RoundNumber, timestamp)
+	base := chain.node.ConsensusThreshold(timestamp, true)
+	signers, finalized := chain.node.cacheVerifyCosi(s.Hash, s.Signature, cids, publics, base)
 	if finalized {
+		// FIXME we have an issue in determining the removing node
+		//if finalized || chain.node.networkId.String() != config.KernelNetworkId ||
+		//timestamp > mainnetConsensusNodeRemovalTimeForkAt {
 		return signers, finalized
 	}
 
-	// FIXME because some to be removed node can still make a signature, so remove this
-	// hack after the bug fixed. But this should be kept for old snapshots, only removed
-	// for new created snapshots.
-	nodes := chain.node.NodesListWithoutState(s.Timestamp, false)
-	rn := nodes[len(nodes)-1]
-	if rn.State != common.NodeStateRemoved {
-		return nil, finalized
+	logger.Printf("verifyFinalization(%v) node removal time fork check", s)
+	hour := (timestamp - chain.node.Epoch) / uint64(time.Hour) % 24
+	if hour < config.KernelNodeAcceptTimeBegin || hour > config.KernelNodeAcceptTimeEnd {
+		return signers, finalized
 	}
-	timestamp := s.Timestamp - uint64(config.KernelNodeAcceptPeriodMinimum)
-	if rn.Timestamp < timestamp {
-		return nil, finalized
+	elapsed := hour + 1 - config.KernelNodeAcceptTimeBegin
+	timestamp = timestamp - elapsed*uint64(time.Hour)
+	acids, apublics := chain.ConsensusKeys(s.RoundNumber, timestamp)
+	if len(apublics) <= len(publics) {
+		return signers, finalized
 	}
-
-	rs := []crypto.Hash{rn.IdForNetwork}
-	rk := []*crypto.Key{&rn.Signer.PublicSpendKey}
-	cids = append(rs, cids...)
-	publics = append(rk, publics...)
-	return chain.node.CacheVerifyCosi(s.Hash, s.Signature, cids, publics, base)
+	abase := chain.node.ConsensusThreshold(timestamp, true)
+	return chain.node.cacheVerifyCosi(s.Hash, s.Signature, acids, apublics, abase)
 }
 
-func (chain *Chain) legacyVerifyFinalization(timestamp uint64, sigs []*crypto.Signature) bool {
-	return len(sigs) >= chain.node.ConsensusThreshold(timestamp, true)
+func (node *Node) ReadLastConsensusSnapshotWithHack() (*common.Snapshot, bool) {
+	last, err := node.persistStore.ReadLastConsensusSnapshot()
+	if err != nil {
+		panic(err)
+	}
+	if last != nil {
+		return last, false
+	}
+	if node.networkId.String() != config.KernelNetworkId {
+		panic(node.networkId.String())
+	}
+
+	now := clock.NowUnixNano()
+	nodes := node.persistStore.ReadAllNodes(now, false)
+	ns := node.readSnapshotForTransaction(nodes[len(nodes)-1].Transaction)
+
+	dist, err := node.persistStore.ReadLastMintDistribution(^uint64(0))
+	if err != nil {
+		panic(err)
+	}
+	ds := node.readSnapshotForTransaction(dist.Transaction)
+
+	if ns.Timestamp > ds.Timestamp {
+		return ns, true
+	}
+	return ds, true
+}
+
+func (node *Node) readSnapshotForTransaction(h crypto.Hash) *common.Snapshot {
+	_, dsh, err := node.persistStore.ReadTransaction(h)
+	if err != nil {
+		panic(err)
+	}
+	h, err = crypto.HashFromString(dsh)
+	if err != nil {
+		panic(err)
+	}
+	snap, err := node.persistStore.ReadSnapshot(h)
+	if err != nil {
+		panic(err)
+	}
+	return snap.Snapshot
+}
+
+func (node *Node) WriteConsensusSnapshotWithHack(snap *common.Snapshot, tx *common.VersionedTransaction) error {
+	switch tx.TransactionType() {
+	case common.TransactionTypeNodePledge,
+		common.TransactionTypeNodeCancel,
+		common.TransactionTypeNodeAccept,
+		common.TransactionTypeNodeRemove,
+		common.TransactionTypeMint,
+		common.TransactionTypeCustodianUpdateNodes,
+		common.TransactionTypeCustodianSlashNodes:
+	default:
+		panic(tx.TransactionType())
+	}
+	last, hack := node.ReadLastConsensusSnapshotWithHack()
+	if !hack {
+		return node.persistStore.WriteConsensusSnapshot(snap, tx, nil)
+	}
+
+	if node.networkId.String() != config.KernelNetworkId {
+		panic(node.networkId.String())
+	}
+	if len(tx.References) == 0 {
+		return nil
+	}
+	return node.persistStore.WriteConsensusSnapshot(snap, tx, last)
 }

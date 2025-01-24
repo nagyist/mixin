@@ -1,64 +1,46 @@
 [node]
 # the private spend key of the signer
-signer-key = "56a7904a2dfd71c397bb48584033d8cb6ddcde9b46b7d91f07d2ede061723a0b"
-# limit the peers that can establish a connection and exchange snapshots
-consensus-only = false
+signer-key = "8bcfad3959892e8334fa287a3c9755fed017cd7a9e8c68d7540dc9e69fa4a00d"
 # the period in seconds to check some mint and election kernel opportunities
 kernel-operation-period = 700
 # the maximum cache size in MB
-memory-cache-size = 4096
+memory-cache-size = 1024
 # how many seconds to keep unconfirmed transactions in the cache storage
 # this also limits the confirmed snapshots finalization cache to peer
-cache-ttl = 7200
+cache-ttl = 3600
 
 [storage]
-# enable value log gc will reduce disk storage usage
+# enable badger value log gc will reduce disk storage usage
 value-log-gc = true
+# max levels should be increased when data too big and badger panic
+# increase the level to 8 when data grows big to exceed 16TB
+# the max levels can not be decreased once up, so be cautious
+max-compaction-levels = 7
 
-[network]
-# the public endpoint to receive peer packets, may be a proxy or load balancer
-# must be a public reachable domain or IP, and the port allowed by firewall
-listener = "mixin-node.example.com:7239"
-# whether to gossip known neighbors to neighbors, and to connect neighbors gossiped
-# by neighbors
-gossip-neighbors = true
+[p2p]
+# the UDP port for communication with other nodes
+port = 5850
+# the seed relayer nodes list
+seeds = [
+	"06ff8589d5d8b40dd90a8120fa65b273d136ba4896e46ad20d76e53a9b73fd9f@seed.mixin.dev:5850",
+	"38047dc7632a7bcdef6a2dfab925de3a74bdde05a58f4623a3195a09d37c78fc@seed-mixin-node.exinpool.com:5850",
+	"7fbf429b73598f63efbfbbe50bf3f6086efbb1e119c183cfb1e33dbfcec0cc3b@mixin-node-seed.f1ex.io:5850",
+	"6d4f5cd8b1fafc6714afaaaf8626d213aaa7566796be6221fea84b807bac1307@mixin-seed.b1.run:5850"
+]
+# a relayer needs a public address to listen and relay messages to other nodes
+# a signer should set this value to false for security
+relayer = false
 # metric different message types sent and received
 metric = false
-# the nodes list
-peers = [
-  "mixin-node-01.b1.run:7239",
-  "mixin-node-02.b1.run:7239",
-  "mixin-node-04.b1.run:7239",
-  "mixin-node-06.b1.run:7239",
-  "mixin-node-07.b1.run:7239",
-  "34.170.158.76:7239",
-  "mixin-node0.exinpool.com:7239",
-  "mixin-node1.exinpool.com:7239",
-  "mixin-node2.exinpool.com:7239",
-  "mixin-node3.exinpool.com:7239",
-  "35.188.242.130:7239",
-  "34.139.30.28:7239",
-  "34.23.166.169:7239",
-  "35.237.31.30:7239",
-  "1.mixpoolin.com",
-  "34.122.129.112:7239",
-  "35.225.9.157:7239",
-  "35.238.184.171:7239",
-  "node-okashi.mixin.fan:7239",
-  "node-42.f1ex.io:7239",
-  "34.86.209.97:7239",
-  "mixin-node-01.b.watch:7239",
-  "mixin-node-02.b.watch:7239",
-  "mixin-node-03.b.watch:7239",
-  "mixin-node-04.b.watch:7239",
-  "lehigh.hotot.org:7239",
-  "lehigh-2.hotot.org:7239",
-]
 
 [rpc]
+# enable rpc access by setting a valid TCP port number
+port = 6860
 # whether respond the runtime of each RPC call
 runtime = false
+# enable the object server
+object-server = false
 
 [dev]
-# whether to enable the pprof web server
-profile = false
+# enable the pprof web server with a valid TCP port number
+port = 7870
