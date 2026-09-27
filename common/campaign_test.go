@@ -96,9 +96,10 @@ func TestWithdrawalValidationCampaign(t *testing.T) {
 	require.ErrorContains((&Transaction{
 		Outputs: []*Output{
 			submit.Outputs[0],
+			{Type: OutputTypeScript, Amount: NewInteger(1)},
 			{Type: OutputTypeNodeAccept, Amount: NewInteger(1)},
 		},
-	}).validateWithdrawalSubmit(validInputs), "invalid change type")
+	}).validateWithdrawalSubmit(validInputs), fmt.Sprintf("invalid change type %d", OutputTypeNodeAccept))
 
 	require.ErrorContains((&Transaction{
 		Outputs: []*Output{{Type: OutputTypeScript, Amount: NewInteger(1)}},
@@ -187,11 +188,12 @@ func TestWithdrawalValidationCampaign(t *testing.T) {
 		Asset: XINAssetId,
 		Outputs: []*Output{
 			claim.Outputs[0],
+			{Type: OutputTypeScript, Amount: NewInteger(1)},
 			{Type: OutputTypeNodeAccept, Amount: NewInteger(1)},
 		},
 		References: claim.References,
 		Extra:      claim.Extra,
-	}).validateWithdrawalClaim(store, validInputs, 1, false), "invalid change type")
+	}).validateWithdrawalClaim(store, validInputs, 1, false), fmt.Sprintf("invalid change type %d", OutputTypeNodeAccept))
 
 	require.ErrorContains((&Transaction{
 		Asset:      XINAssetId,
@@ -862,7 +864,7 @@ func TestDepositAndCapacityCampaign(t *testing.T) {
 		{BOXAssetId, "200000000.00000000"},
 		{MOBAssetId, "25000000.00000000"},
 		{USDTEthereumAssetId, "25000000.00000000"},
-		{USDTTRONAssetId, "21000000.00000000"},
+		{USDTTRONAssetId, "20000000.00000000"},
 		{USDTBNBAssetId, "2000000.00000000"},
 		{PandoUSDAssetId, "1000000000000.00000000"},
 		{USDCEthereumAssetId, "3000000.00000000"},

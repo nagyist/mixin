@@ -34,6 +34,8 @@ func GetUTXO(rpc, hash string, index uint64) (*common.UTXOWithLock, error) {
 	utxo.Amount = out.Amount
 	utxo.Keys = out.Keys
 	utxo.Script = out.Script
-	utxo.Mask = *out.Mask
+	if out.Mask != nil {
+		utxo.Mask = *out.Mask
+	}
 	return utxo, nil
 }

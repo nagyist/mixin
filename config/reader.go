@@ -39,11 +39,11 @@ const (
 
 type Custom struct {
 	Node struct {
-		Signer               crypto.Key `toml:"-"`
-		SignerStr            string     `toml:"signer-key"`
-		KernelOprationPeriod int        `toml:"kernel-operation-period"`
-		MemoryCacheSize      int        `toml:"memory-cache-size"`
-		CacheTTL             int        `toml:"cache-ttl"`
+		Signer                crypto.Key `toml:"-"`
+		SignerStr             string     `toml:"signer-key"`
+		KernelOperationPeriod int        `toml:"kernel-operation-period"`
+		MemoryCacheSize       int        `toml:"memory-cache-size"`
+		CacheTTL              int        `toml:"cache-ttl"`
 	} `toml:"node"`
 	Storage struct {
 		ValueLogGC          bool `toml:"value-log-gc"`
@@ -80,8 +80,8 @@ func Initialize(file string) (*Custom, error) {
 		return nil, err
 	}
 	config.Node.Signer = key
-	if config.Node.KernelOprationPeriod == 0 {
-		config.Node.KernelOprationPeriod = 700
+	if config.Node.KernelOperationPeriod == 0 {
+		config.Node.KernelOperationPeriod = 700
 	}
 	if config.Node.MemoryCacheSize == 0 {
 		config.Node.MemoryCacheSize = 1024 * 4

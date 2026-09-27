@@ -554,7 +554,7 @@ func (chain *Chain) cosiHandleCommitment(m *CosiAction) error {
 	ann.Commitments[cd.PN.ConsensusIndex] = m.Commitment
 	ann.WantTxs[m.PeerId] = m.WantTxs
 	ann.FullChallenges[m.PeerId] = m.Action == CosiActionSelfFullCommitment
-	logger.Verbosef("cosiHandleCommitment %v NOW %d %d\nn", m, len(ann.Commitments), base)
+	logger.Verbosef("cosiHandleCommitment %v NOW %d %d\n", m, len(ann.Commitments), base)
 	if len(ann.Commitments) < base {
 		return nil
 	}
@@ -1328,7 +1328,7 @@ func (node *Node) VerifyAndQueueAppendSnapshotFinalization(peerId crypto.Hash, s
 		return nil
 	}
 
-	err = chain.AppendFinalSnapshot(s.NodeId, s)
+	err = chain.AppendFinalSnapshot(peerId, s)
 	if err != nil {
 		logger.Verbosef("VerifyAndQueueAppendSnapshotFinalization(%s, %s) chain error %s\n",
 			peerId, s.Hash, err)

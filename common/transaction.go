@@ -192,7 +192,7 @@ func (signed *SignedTransaction) SignInput(reader UTXOKeysReader, index int, acc
 	if len(accounts) == 0 {
 		return nil
 	}
-	if index >= len(signed.Inputs) {
+	if index < 0 || index >= len(signed.Inputs) {
 		return fmt.Errorf("invalid input index %d/%d", index, len(signed.Inputs))
 	}
 	in := signed.Inputs[index]
@@ -224,7 +224,10 @@ func (signed *SignedTransaction) SignInput(reader UTXOKeysReader, index int, acc
 		sig := priv.Sign(msg)
 		sigs[i] = &sig
 	}
-	signed.SignaturesMap = append(signed.SignaturesMap, sigs)
+	for len(signed.SignaturesMap) <= index {
+		signed.SignaturesMap = append(signed.SignaturesMap, nil)
+	}
+	signed.SignaturesMap[index] = sigs
 	return nil
 }
 
@@ -240,7 +243,7 @@ func (signed *SignedTransaction) SignRaw(key crypto.Key) error {
 	}
 	sig := key.Sign(msg)
 	sigs := map[uint16]*crypto.Signature{0: &sig}
-	signed.SignaturesMap = append(signed.SignaturesMap, sigs)
+	signed.SignaturesMap = []map[uint16]*crypto.Signature{sigs}
 	return nil
 }
 

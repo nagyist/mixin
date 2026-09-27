@@ -25,5 +25,8 @@ func GetDepositTransaction(rpc, chain, hash string, index uint64) (*common.Versi
 	if err != nil {
 		panic(string(raw))
 	}
+	if signed["snapshot"] == nil {
+		return ver, "", nil
+	}
 	return ver, signed["snapshot"].(string), nil
 }

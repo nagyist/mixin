@@ -93,6 +93,7 @@ func TestMapAndMetricHelpers(t *testing.T) {
 	require.Equal(uint32(1), mp.PeerMessageTypeSnapshotFinalization)
 	require.Equal(uint32(1), mp.PeerMessageTypeRelay)
 	require.Contains(mp.String(), `"relay":1`)
+	require.Contains(mp.String(), `"transaction-challenge":1`)
 
 	var wg sync.WaitGroup
 	wg.Go(func() {

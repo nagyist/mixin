@@ -47,14 +47,14 @@ func (tx *Transaction) verifyDepositData(store DataStore) error {
 		return fmt.Errorf("invalid transaction hash %s", deposit.Transaction)
 	}
 	old, balance, err := store.ReadAssetWithBalance(tx.Asset)
-	if err != nil || old == nil {
+	if err != nil {
 		return err
 	}
 	total := balance.Add(deposit.Amount)
 	if total.Cmp(GetAssetCapacity(tx.Asset)) >= 0 {
 		return fmt.Errorf("invalid deposit capacity %s", total.String())
 	}
-	if old.Chain == asset.Chain && old.AssetKey == asset.AssetKey {
+	if old == nil || (old.Chain == asset.Chain && old.AssetKey == asset.AssetKey) {
 		return nil
 	}
 	return fmt.Errorf("invalid asset info %s %v %v", tx.Asset, *old, *asset)

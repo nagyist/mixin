@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/MixinNetwork/mixin/common"
@@ -9,6 +10,49 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 )
+
+func TestValidateGraphEntriesCollectsCountsAndErrors(t *testing.T) {
+	for _, count := range []int{0, 1, 3} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			store := newTestBadgerStore(t)
+			network := crypto.Blake3Hash([]byte("validation network"))
+			require.NoError(t, store.snapshotsDB.Update(func(txn *badger.Txn) error {
+				for i := range count {
+					key := seededPublicKey(byte(23 + i))
+					if err := writeNodeAccept(txn, key, key, crypto.Blake3Hash([]byte{byte(i)}), uint64(i+1), true); err != nil {
+						return err
+					}
+				}
+				return nil
+			}))
+			nodes := store.ReadAllNodes(^uint64(0), false)
+			require.Len(t, nodes, count)
+			require.NoError(t, store.snapshotsDB.Update(func(txn *badger.Txn) error {
+				for _, n := range nodes {
+					id := n.IdForNetwork(network)
+					tx := common.NewTransactionV5(common.XINAssetId).AsVersioned()
+					snap := snapshotWithTopoForTx(id, 0, 1, 1, tx)
+					if err := writeRound(txn, id, &common.Round{Hash: id, NodeId: id, Number: 1, References: &common.RoundLink{}}); err != nil {
+						return err
+					}
+					// The snapshot's transaction is deliberately absent.
+					if err := txn.Set(graphSnapshotKey(id, 0, snap.PayloadHash()), snap.VersionedMarshal()); err != nil {
+						return err
+					}
+				}
+				return nil
+			}))
+			total, invalid, err := store.ValidateGraphEntries(network, 1)
+			if count == 0 {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, badger.ErrKeyNotFound)
+			}
+			require.Equal(t, count, total)
+			require.Zero(t, invalid)
+		})
+	}
+}
 
 func TestSnapshotValidationErrorPaths(t *testing.T) {
 	node := crypto.Blake3Hash([]byte("validation error node"))

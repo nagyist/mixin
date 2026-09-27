@@ -85,7 +85,7 @@ func TestDecodeAggregatedSignatureTransactionsRejectEveryTruncation(t *testing.T
 	}
 }
 
-func TestDecodeSnapshotTruncationsDoNotPanic(t *testing.T) {
+func TestDecodeSnapshotRejectsPartialFields(t *testing.T) {
 	snapshot := &SnapshotWithTopologicalOrder{
 		Snapshot: &Snapshot{
 			Version:      SnapshotVersionCommonEncoding,
@@ -104,9 +104,16 @@ func TestDecodeSnapshotTruncationsDoNotPanic(t *testing.T) {
 	require.Equal(t, snapshot.TopologicalOrder, decoded.TopologicalOrder)
 
 	for cut := range len(encoded) {
-		require.NotPanics(t, func() {
-			_, _ = NewDecoder(encoded[:cut]).DecodeSnapshotWithTopo()
-		}, "cut=%d", cut)
+		decoded, err := UnmarshalVersionedSnapshot(encoded[:cut])
+		if cut == len(encoded)-8 {
+			// Network payloads omit the entire topological order.
+			require.NoError(t, err)
+			require.Zero(t, decoded.TopologicalOrder)
+			require.Equal(t, snapshot.Snapshot, decoded.Snapshot)
+		} else {
+			require.Error(t, err, "cut=%d", cut)
+			require.Nil(t, decoded, "cut=%d", cut)
+		}
 	}
 }
 

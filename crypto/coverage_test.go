@@ -379,9 +379,13 @@ func TestReadRandBranches(t *testing.T) {
 		ReadRand(nil)
 	})
 
-	buf := make([]byte, 3)
-	ReadRand(buf)
-	require.NotEqual([]byte{0, 0, 0}, buf)
+	for size := 1; size <= 65; size++ {
+		buf := make([]byte, size)
+		require.NotPanics(func() { ReadRand(buf) }, "size=%d", size)
+		n, err := RandReader().Read(buf)
+		require.NoError(err)
+		require.Equal(size, n)
+	}
 }
 
 func testSeed(base byte) []byte {

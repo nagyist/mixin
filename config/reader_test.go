@@ -13,7 +13,7 @@ func TestConfigParsing(t *testing.T) {
 	require.Nil(err)
 
 	require.Equal("8bcfad3959892e8334fa287a3c9755fed017cd7a9e8c68d7540dc9e69fa4a00d", custom.Node.Signer.String())
-	require.Equal(700, custom.Node.KernelOprationPeriod)
+	require.Equal(700, custom.Node.KernelOperationPeriod)
 	require.Equal(512, custom.Node.MemoryCacheSize)
 	require.Equal(3600, custom.Node.CacheTTL)
 
